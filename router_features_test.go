@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/middleware/session"
+	"github.com/oarkflow/fh/mw/session"
 )
 
 func TestCompiledRoutePatternUsesRouterSemantics(t *testing.T) {

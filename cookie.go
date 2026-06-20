@@ -39,7 +39,7 @@ func (c *Cookie) Valid() error {
 	if c == nil || !validToken([]byte(c.Name)) || c.Name == "" || !validCookieValue(c.Value) {
 		return ErrInvalidCookie
 	}
-	if strings.IndexAny(c.Path, ";\x00\r\n") >= 0 || strings.IndexAny(c.Domain, ";\x00\r\n") >= 0 {
+	if strings.ContainsAny(c.Path, ";\x00\r\n") || strings.ContainsAny(c.Domain, ";\x00\r\n") {
 		return ErrInvalidCookie
 	}
 	if c.Domain != "" && !validCookieDomain(c.Domain) {

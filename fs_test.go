@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/middleware/compress"
+	"github.com/oarkflow/fh/mw/compress"
 )
 
 func TestStaticFileServing(t *testing.T) {

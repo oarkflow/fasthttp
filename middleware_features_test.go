@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/middleware/bodylimit"
-	cachemw "github.com/oarkflow/fh/middleware/cache"
-	"github.com/oarkflow/fh/middleware/cors"
-	"github.com/oarkflow/fh/middleware/csrf"
-	"github.com/oarkflow/fh/middleware/earlydata"
-	"github.com/oarkflow/fh/middleware/rewrite"
-	"github.com/oarkflow/fh/middleware/skip"
+	"github.com/oarkflow/fh/mw/bodylimit"
+	cachemw "github.com/oarkflow/fh/mw/cache"
+	"github.com/oarkflow/fh/mw/cors"
+	"github.com/oarkflow/fh/mw/csrf"
+	"github.com/oarkflow/fh/mw/earlydata"
+	"github.com/oarkflow/fh/mw/rewrite"
+	"github.com/oarkflow/fh/mw/skip"
 )
 
 func request(t *testing.T, addr, method, path, body string, headers map[string]string) (int, string, http.Header) {

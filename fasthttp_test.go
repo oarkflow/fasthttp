@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/middleware/compress"
-	"github.com/oarkflow/fh/middleware/cors"
-	"github.com/oarkflow/fh/middleware/recover"
-	"github.com/oarkflow/fh/middleware/requestid"
-	"github.com/oarkflow/fh/middleware/security"
-	"github.com/oarkflow/fh/middleware/session"
-	"github.com/oarkflow/fh/middleware/timeout"
+	"github.com/oarkflow/fh/mw/compress"
+	"github.com/oarkflow/fh/mw/cors"
+	"github.com/oarkflow/fh/mw/recover"
+	"github.com/oarkflow/fh/mw/requestid"
+	"github.com/oarkflow/fh/mw/security"
+	"github.com/oarkflow/fh/mw/session"
+	"github.com/oarkflow/fh/mw/timeout"
 )
 
 // testServer starts the app on a random port and returns the address.
