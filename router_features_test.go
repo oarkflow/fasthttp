@@ -12,6 +12,32 @@ import (
 	"github.com/oarkflow/fasthttp/middleware/session"
 )
 
+func TestCompiledRoutePatternUsesRouterSemantics(t *testing.T) {
+	tests := []struct {
+		pattern, path string
+		want          map[string]string
+		ok            bool
+	}{
+		{"/static", "/static", nil, true},
+		{"/users/:id", "/users/42", map[string]string{"id": "42"}, true},
+		{"/users/:id", "/users/42/edit", nil, false},
+		{"/assets/*", "/assets/css/app.css", map[string]string{"*": "css/app.css"}, true},
+		{"/docs/*path", "/docs/api/v2", map[string]string{"path": "api/v2"}, true},
+	}
+	for _, tt := range tests {
+		pattern := fh.CompileRoutePattern(tt.pattern)
+		var params []fh.Param
+		if got := pattern.Match(tt.path, &params); got != tt.ok {
+			t.Fatalf("%s vs %s = %v", tt.pattern, tt.path, got)
+		}
+		for _, param := range params {
+			if tt.want[param.Key] != param.Value {
+				t.Fatalf("%s: %s=%q", tt.pattern, param.Key, param.Value)
+			}
+		}
+	}
+}
+
 func TestNamedRouteURLAndRedirectTo(t *testing.T) {
 	app := fh.New()
 	app.Get("/users/:id", func(c *fh.Ctx) error {

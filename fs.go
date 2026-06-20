@@ -220,13 +220,24 @@ func (s *staticFS) serveDir(c *Ctx, upath string) error {
 func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
 	fi := s.fileInfo(upath, info)
 
+	if match := c.Get("If-Match"); match != "" && !etagListMatches(match, fi.etag, false) {
+		return c.Status(StatusPreconditionFailed).SendStatus(StatusPreconditionFailed)
+	}
+	if ius := c.Get("If-Unmodified-Since"); ius != "" {
+		if t, err := time.Parse(httpTimeFormat, ius); err == nil && info.ModTime().After(t.Add(time.Second)) {
+			return c.Status(StatusPreconditionFailed).SendStatus(StatusPreconditionFailed)
+		}
+	}
 	if match := c.Get("If-None-Match"); match != "" {
-		if match == fi.etag || match == "*" {
-			return c.Status(304).SendStatus(304)
+		if etagListMatches(match, fi.etag, true) {
+			if c.Method() == MethodGET || c.Method() == MethodHEAD {
+				return c.Status(StatusNotModified).SendStatus(StatusNotModified)
+			}
+			return c.Status(StatusPreconditionFailed).SendStatus(StatusPreconditionFailed)
 		}
 	}
 
-	if ims := c.Get("If-Modified-Since"); ims != "" {
+	if ims := c.Get("If-Modified-Since"); ims != "" && c.Get("If-None-Match") == "" {
 		t, err := time.Parse(httpTimeFormat, ims)
 		if err == nil && !info.ModTime().After(t) {
 			return c.Status(304).SendStatus(304)
@@ -267,6 +278,7 @@ func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
 				return c.SendBytes(data)
 			}
 		} else if strings.HasPrefix(rangeHeader, "bytes=") {
+			c.Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
 			return c.Status(416).SendStatus(416)
 		}
 	}
@@ -276,7 +288,7 @@ func (s *staticFS) writeFile(c *Ctx, upath string, info fs.FileInfo) error {
 		if acceptsGzip(ae) {
 			c.Set("Content-Encoding", "gzip")
 			c.Append("Vary", "Accept-Encoding")
-			c.TransformBody(func(body []byte) ([]byte, error) {
+			c.AddBodyTransform(func(body []byte) ([]byte, error) {
 				var buf bytes.Buffer
 				w := fsGzipPool.Get().(*gzip.Writer)
 				w.Reset(&buf)
@@ -454,17 +466,38 @@ func generateETag(info fs.FileInfo) string {
 	size := info.Size()
 
 	const hex = "0123456789abcdef"
-	var b [33]byte
+	var b [35]byte
+	b[0] = '"'
 	for i := 16; i > 0; i-- {
-		b[i-1] = hex[mtime&0xf]
+		b[i] = hex[mtime&0xf]
 		mtime >>= 4
 	}
-	b[16] = '-'
-	for i := 32; i > 16; i-- {
+	b[17] = '-'
+	for i := 33; i > 17; i-- {
 		b[i] = hex[size&0xf]
 		size >>= 4
 	}
+	b[34] = '"'
 	return string(b[:])
+}
+
+func etagListMatches(header, current string, weak bool) bool {
+	for _, raw := range strings.Split(header, ",") {
+		tag := strings.TrimSpace(raw)
+		if tag == "*" {
+			return true
+		}
+		if weak {
+			tag = strings.TrimPrefix(tag, "W/")
+			cur := strings.TrimPrefix(current, "W/")
+			if tag == cur {
+				return true
+			}
+		} else if tag == current {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *staticFS) fileInfo(upath string, info fs.FileInfo) cacheEntry {

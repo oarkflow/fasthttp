@@ -45,6 +45,8 @@ type Config struct {
 	ErrorHandler         func(*Ctx, error)
 	Logger               *log.Logger
 	TemplateEngine       TemplateEngine
+	// Debug exposes private error causes in 500 responses. Keep disabled in production.
+	Debug bool
 }
 
 var defaultConfig = Config{
@@ -58,6 +60,7 @@ var defaultConfig = Config{
 }
 
 var ErrAppAlreadyStarted = errors.New("fasthttp: app has already been started")
+var ErrRewrite = errors.New("fasthttp: reroute rewritten request")
 
 // ── App ────────────────────────────────────────────────────────────────────
 
@@ -80,6 +83,7 @@ type App struct {
 	buildMu      sync.Mutex
 	groups       []*Group
 	lastRoute    namedRoute
+	errorCounts  sync.Map // error code -> *atomic.Uint64
 }
 
 type connState struct {
@@ -121,6 +125,7 @@ func New(config ...Config) *App {
 		cfg.ErrorHandler = c.ErrorHandler
 		cfg.Logger = c.Logger
 		cfg.TemplateEngine = c.TemplateEngine
+		cfg.Debug = c.Debug
 	}
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
@@ -749,49 +754,68 @@ func (a *App) serveConn(conn net.Conn) {
 func (a *App) dispatch(ctx *Ctx) {
 	defer func() {
 		if r := recover(); r != nil {
-			a.logger.Printf("[fasthttp] panic: %v\n%s", r, debug.Stack())
+			if a.cfg.Debug {
+				a.logger.Printf("[fasthttp] panic: %v\n%s", r, debug.Stack())
+			} else {
+				a.logger.Printf("[fasthttp] panic: %v", r)
+			}
 			if !ctx.responded {
-				_ = ctx.Status(500).SendString("Internal Server Error")
+				a.cfg.ErrorHandler(ctx, WrapHTTPError(errors.New("panic in request handler"), StatusInternalServerError, "INTERNAL_ERROR", "An internal server error occurred"))
 			}
 		}
 	}()
 
-	path := ctx.path()
-	handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
-	if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
+	for rewrites := 0; ; rewrites++ {
+		if rewrites > 8 {
+			a.cfg.ErrorHandler(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))
+			return
+		}
 		ctx.params = ctx.params[:0]
-		handler = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
-	}
+		path := ctx.path()
+		handler := a.router.FindBytes(ctx.Header.Method, path, &ctx.params)
+		if handler == nil && bytesEqualFold(ctx.Header.Method, MethodHEADBytes) {
+			ctx.params = ctx.params[:0]
+			handler = a.router.FindBytes(MethodGETBytes, path, &ctx.params)
+		}
 
-	if handler == nil {
-		ctx.params = ctx.params[:0]
-		allowed := a.router.Allowed(path)
-		if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) && len(path) == 1 && path[0] == '*' {
-			allowed = a.router.Methods()
-		}
-		fallback := func(ctx *Ctx) error {
-			if len(allowed) == 0 {
-				return ctx.Status(404).SendString("404 Not Found")
+		if handler == nil {
+			ctx.params = ctx.params[:0]
+			allowed := a.router.Allowed(path)
+			if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) && len(path) == 1 && path[0] == '*' {
+				allowed = a.router.Methods()
 			}
-			ctx.Set("Allow", strings.Join(allowed, ", "))
-			if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) {
-				return ctx.SendStatus(204)
+			fallback := func(ctx *Ctx) error {
+				if len(allowed) == 0 {
+					return ctx.Status(404).SendString("404 Not Found")
+				}
+				ctx.Set("Allow", strings.Join(allowed, ", "))
+				if bytesEqualFold(ctx.Header.Method, MethodOPTIONSBytes) {
+					return ctx.SendStatus(204)
+				}
+				return ctx.Status(405).SendString("405 Method Not Allowed")
 			}
-			return ctx.Status(405).SendString("405 Method Not Allowed")
+			if len(a.middleware) > 0 {
+				handler = a.chain([]HandlerFunc{fallback})
+			} else {
+				handler = fallback
+			}
 		}
-		if len(a.middleware) > 0 {
-			handler = a.chain([]HandlerFunc{fallback})
-		} else {
-			handler = fallback
-		}
-	}
 
-	if err := handler(ctx); err != nil {
-		if !ctx.responded {
-			a.cfg.ErrorHandler(ctx, err)
+		err := handler(ctx)
+		if errors.Is(err, ErrRewrite) {
+			if ctx.responded {
+				return
+			}
+			continue
 		}
-	} else if !ctx.responded {
-		_ = ctx.SendStatus(200)
+		if err != nil {
+			if !ctx.responded {
+				a.cfg.ErrorHandler(ctx, err)
+			}
+		} else if !ctx.responded {
+			_ = ctx.SendStatus(200)
+		}
+		return
 	}
 }
 
@@ -849,7 +873,27 @@ func isExpectedConnErr(err error) bool {
 }
 
 func defaultErrorHandler(ctx *Ctx, err error) {
-	ctx.Status(500).SendString("Internal Server Error: " + err.Error())
+	if ctx.server != nil && ctx.server.logger != nil {
+		ctx.server.logger.Printf("[fasthttp] request error: %v", err)
+	}
+	_ = ctx.ErrorResponse(err)
+}
+
+func (a *App) recordError(code string) {
+	if code == "" {
+		code = "UNKNOWN"
+	}
+	v, _ := a.errorCounts.LoadOrStore(code, &atomic.Uint64{})
+	v.(*atomic.Uint64).Add(1)
+}
+
+// ErrorCount returns the number of errors rendered for a stable error code.
+func (a *App) ErrorCount(code string) uint64 {
+	v, ok := a.errorCounts.Load(code)
+	if !ok {
+		return 0
+	}
+	return v.(*atomic.Uint64).Load()
 }
 
 // Pre-allocated 400 error response

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"mime/multipart"
 	"net/textproto"
@@ -106,6 +107,16 @@ type MultipartFile struct {
 	Data      []byte
 }
 
+// Open returns a new reader over the uploaded file contents.
+func (f MultipartFile) Open() io.ReadCloser {
+	return io.NopCloser(bytes.NewReader(f.Data))
+}
+
+// Save writes an uploaded file to dst with restrictive default permissions.
+func (f MultipartFile) Save(dst string) error {
+	return saveUploadedFile(dst, f.Data, 0600)
+}
+
 // MultipartForm is the decoded representation of multipart/form-data.
 type MultipartForm struct {
 	Values url.Values
@@ -118,6 +129,22 @@ func (m *MultipartForm) First(key string) string {
 		return ""
 	}
 	return m.Values.Get(key)
+}
+
+// File returns the first uploaded file for a field.
+func (m *MultipartForm) File(field string) (*MultipartFile, error) {
+	if m == nil || len(m.Files[field]) == 0 {
+		return nil, fs.ErrNotExist
+	}
+	return &m.Files[field][0], nil
+}
+
+// FileValues returns all uploaded files for a field.
+func (m *MultipartForm) FileValues(field string) []MultipartFile {
+	if m == nil {
+		return nil
+	}
+	return m.Files[field]
 }
 
 // CodecOptions controls defensive limits. These limits are intentionally sane

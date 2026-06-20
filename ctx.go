@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"net/url"
@@ -56,6 +55,9 @@ type Ctx struct {
 	responseTime    time.Time
 	beforeResponse  []func(*Ctx) error
 	beforeRan       bool
+	multipartForm   *MultipartForm
+	multipartErr    error
+	multipartParsed bool
 }
 
 type localEntry struct {
@@ -131,6 +133,9 @@ func (c *Ctx) reset() {
 	clear(c.beforeResponse)
 	c.beforeResponse = c.beforeResponse[:0]
 	c.beforeRan = false
+	c.multipartForm = nil
+	c.multipartErr = nil
+	c.multipartParsed = false
 }
 
 // OnBeforeResponse registers a one-shot hook run immediately before response
@@ -183,6 +188,21 @@ func (c *Ctx) path() []byte {
 }
 
 func (c *Ctx) Path() string { return string(c.path()) }
+
+// Rewrite updates the request URI and asks the application to route it again.
+// It is intended for rewrite middleware and is bounded by the application to
+// prevent rewrite loops.
+func (c *Ctx) Rewrite(target string) error {
+	if target == "" || target[0] != '/' || strings.ContainsAny(target, "\x00\r\n") {
+		return BadRequest("Invalid rewrite target")
+	}
+	c.Header.URI = []byte(target)
+	c.queryParsed = false
+	c.qcount = 0
+	clear(c.queryParams)
+	c.queryParams = c.queryParams[:0]
+	return ErrRewrite
+}
 
 func (c *Ctx) Param(name string) string {
 	for i := range c.params {
@@ -340,6 +360,26 @@ func (c *Ctx) SetContext(ctx context.Context) {
 // for middleware such as gzip compression and does not affect Stream output.
 func (c *Ctx) TransformBody(fn func([]byte) ([]byte, error)) { c.bodyTransform = fn }
 
+// AddBodyTransform appends a response transformation without replacing an
+// existing middleware transformation.
+func (c *Ctx) AddBodyTransform(fn func([]byte) ([]byte, error)) {
+	if fn == nil {
+		return
+	}
+	previous := c.bodyTransform
+	if previous == nil {
+		c.bodyTransform = fn
+		return
+	}
+	c.bodyTransform = func(body []byte) ([]byte, error) {
+		body, err := previous(body)
+		if err != nil {
+			return nil, err
+		}
+		return fn(body)
+	}
+}
+
 func (c *Ctx) Get(name string) string { return c.Header.PeekStr(name) }
 
 func (c *Ctx) Locals(key string, value ...any) any {
@@ -472,6 +512,27 @@ func (c *Ctx) Type(mime string) *Ctx {
 	return c
 }
 
+// ResponseHeader returns a response header set so far.
+func (c *Ctx) ResponseHeader(name string) string {
+	if strings.EqualFold(name, HeaderContentType) {
+		return string(c.contentType)
+	}
+	for i := 0; i < c.chCount; i++ {
+		if strings.EqualFold(string(c.customHeaders[i].Key), name) {
+			return string(c.customHeaders[i].Value)
+		}
+	}
+	for i := range c.extraHeaders {
+		if strings.EqualFold(string(c.extraHeaders[i].Key), name) {
+			return string(c.extraHeaders[i].Value)
+		}
+	}
+	return ""
+}
+
+// HasResponseCookies reports whether the response currently sets cookies.
+func (c *Ctx) HasResponseCookies() bool { return len(c.responseCookies) > 0 }
+
 func (c *Ctx) FirstCookie() string {
 	if len(c.responseCookies) == 0 {
 		return ""
@@ -504,7 +565,7 @@ func (c *Ctx) JSON(v any) error {
 func (c *Ctx) Render(name string, data any, layout ...string) error {
 	engine := c.server.cfg.TemplateEngine
 	if engine == nil {
-		return errors.New("fasthttp: no template engine configured")
+		return NewHTTPError(StatusInternalServerError, "TEMPLATE_ENGINE_MISSING", "fasthttp: no template engine configured")
 	}
 	var buf bytes.Buffer
 	if err := engine.Render(&buf, name, data, layout...); err != nil {

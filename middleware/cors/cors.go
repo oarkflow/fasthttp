@@ -13,15 +13,16 @@ type OriginStore interface {
 }
 
 type Config struct {
-	AllowOrigins []string
-	AllowMethods []string
-	AllowHeaders []string
+	AllowOrigins  []string
+	AllowMethods  []string
+	AllowHeaders  []string
 	ExposeHeaders []string
 
-	AllowCredentials bool
+	AllowCredentials    bool
 	AllowPrivateNetwork bool
 
-	MaxAge int
+	MaxAge          int
+	PreflightStatus int
 
 	OriginStore OriginStore
 
@@ -48,7 +49,8 @@ var DefaultConfig = Config{
 	ExposeHeaders: []string{
 		"X-Request-ID",
 	},
-	MaxAge: 86400,
+	MaxAge:          86400,
+	PreflightStatus: 204,
 }
 
 func New(config ...Config) fh.HandlerFunc {
@@ -103,9 +105,18 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 
 		if isPreflight(ctx) {
+			ctx.Append("Vary", "Access-Control-Request-Method")
+			ctx.Append("Vary", "Access-Control-Request-Headers")
+			requestedMethod := ctx.Get("Access-Control-Request-Method")
+			if !containsFold(cfg.AllowMethods, requestedMethod) {
+				return ctx.Status(403).SendString("CORS preflight method denied")
+			}
 			ctx.Set("Access-Control-Allow-Methods", methods)
 
 			requestHeaders := ctx.Get("Access-Control-Request-Headers")
+			if requestHeaders != "" && !headersAllowed(cfg.AllowHeaders, requestHeaders) {
+				return ctx.Status(403).SendString("CORS preflight headers denied")
+			}
 			if requestHeaders != "" && len(cfg.AllowHeaders) == 1 && cfg.AllowHeaders[0] == "*" {
 				ctx.Set("Access-Control-Allow-Headers", requestHeaders)
 				ctx.Append("Vary", "Access-Control-Request-Headers")
@@ -121,7 +132,7 @@ func New(config ...Config) fh.HandlerFunc {
 				ctx.Set("Access-Control-Max-Age", maxAge)
 			}
 
-			return ctx.SendStatus(204)
+			return ctx.SendStatus(cfg.PreflightStatus)
 		}
 
 		return ctx.Next()
@@ -144,6 +155,9 @@ func mergeConfig(base Config, override Config) Config {
 	if override.MaxAge != 0 {
 		base.MaxAge = override.MaxAge
 	}
+	if override.PreflightStatus != 0 {
+		base.PreflightStatus = override.PreflightStatus
+	}
 	if override.OriginStore != nil {
 		base.OriginStore = override.OriginStore
 	}
@@ -155,6 +169,26 @@ func mergeConfig(base Config, override Config) Config {
 	base.AllowPrivateNetwork = override.AllowPrivateNetwork
 
 	return base
+}
+
+func containsFold(values []string, want string) bool {
+	for _, v := range values {
+		if v == "*" || strings.EqualFold(strings.TrimSpace(v), strings.TrimSpace(want)) {
+			return true
+		}
+	}
+	return false
+}
+func headersAllowed(allowed []string, requested string) bool {
+	if len(allowed) == 1 && allowed[0] == "*" {
+		return true
+	}
+	for _, h := range strings.Split(requested, ",") {
+		if !containsFold(allowed, h) {
+			return false
+		}
+	}
+	return true
 }
 
 func isPreflight(ctx *fh.Ctx) bool {

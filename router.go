@@ -78,6 +78,38 @@ func NewRouter() *Router {
 	}
 }
 
+// RoutePattern is an immutable, compiled route path matcher. It uses the same
+// trie insertion, precedence, path cleanup, parameter, and wildcard logic as
+// Router. It is useful for middleware that needs router-identical path matching.
+type RoutePattern struct{ root *node }
+
+// CompileRoutePattern compiles one router path pattern. Supported forms are
+// static segments, :named parameters, and terminal * or *named wildcards.
+func CompileRoutePattern(pattern string) *RoutePattern {
+	pattern = normalizeRoutePath("MATCH", pattern)
+	root := &node{}
+	insertRoute(root, "MATCH", pattern, splitRouteSegments(pattern), 0, func(*Ctx) error { return nil }, nil)
+	return &RoutePattern{root: root}
+}
+
+// Match matches path and appends captured values to params. Query strings are
+// ignored. The returned parameter strings are safe copies.
+func (p *RoutePattern) Match(path string, params *[]Param) bool {
+	if p == nil || p.root == nil {
+		return false
+	}
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if params == nil {
+		var local []Param
+		params = &local
+	} else {
+		*params = (*params)[:0]
+	}
+	return match(p.root, cleanLookupPath(s2b(path)), params, false) != nil
+}
+
 // AddNamed registers a route and gives it a name for reverse URL generation.
 func (r *Router) AddNamed(method, path, name string, h HandlerFunc) {
 	r.Add(method, path, h)

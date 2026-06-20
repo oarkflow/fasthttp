@@ -69,17 +69,17 @@ func New(config ...Config) fh.HandlerFunc {
 			return ctx.Next()
 		}
 
-		ctx.TransformBody(func(body []byte) ([]byte, error) {
+		ctx.AddBodyTransform(func(body []byte) ([]byte, error) {
 			if len(body) < cfg.MinSize {
 				return body, nil
 			}
 
 			// Avoid double compression if a previous middleware/app already set encoding.
-			if ctx.Get("Content-Encoding") != "" {
+			if ctx.ResponseHeader("Content-Encoding") != "" {
 				return body, nil
 			}
 
-			contentType := ctx.Get("Content-Type")
+			contentType := ctx.ResponseHeader("Content-Type")
 			if contentType != "" && !isCompressible(contentType, cfg.CompressibleTypes) {
 				return body, nil
 			}
