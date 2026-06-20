@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 var gzipPool = sync.Pool{

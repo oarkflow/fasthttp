@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/orgware/fasthttp"
-	"github.com/orgware/fasthttp/middleware/compress"
-	"github.com/orgware/fasthttp/middleware/cors"
-	"github.com/orgware/fasthttp/middleware/recover"
-	"github.com/orgware/fasthttp/middleware/requestid"
-	"github.com/orgware/fasthttp/middleware/security"
-	sessionmw "github.com/orgware/fasthttp/middleware/session"
-	"github.com/orgware/fasthttp/middleware/timeout"
+	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fasthttp/middleware/compress"
+	"github.com/oarkflow/fasthttp/middleware/cors"
+	"github.com/oarkflow/fasthttp/middleware/recover"
+	"github.com/oarkflow/fasthttp/middleware/requestid"
+	"github.com/oarkflow/fasthttp/middleware/security"
+	sessionmw "github.com/oarkflow/fasthttp/middleware/session"
+	"github.com/oarkflow/fasthttp/middleware/timeout"
 )
 
 // testServer starts the app on a random port and returns the address.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 // ── In-memory pipe-based listener (no TCP stack, low noise) ───────────────

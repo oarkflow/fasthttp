@@ -1,7 +1,7 @@
 package session
 
 import (
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 // New returns a middleware that loads the session on request and saves it

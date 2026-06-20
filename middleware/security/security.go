@@ -3,7 +3,7 @@ package security
 import (
 	"strconv"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 type Config struct {

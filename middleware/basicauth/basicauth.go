@@ -3,7 +3,7 @@ package basicauth
 import (
 	"crypto/subtle"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 func New(username, password string) fh.HandlerFunc {

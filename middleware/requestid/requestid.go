@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 var counter uint64

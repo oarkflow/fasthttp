@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/orgware/fasthttp/internal/hpack"
+	"github.com/oarkflow/fasthttp/internal/hpack"
 )
 
 var h2ClientPreface = []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")

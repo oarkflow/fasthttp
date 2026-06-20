@@ -3,7 +3,7 @@ package recover
 import (
 	"fmt"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 func New() fh.HandlerFunc {

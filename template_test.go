@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 type mockEngine struct {

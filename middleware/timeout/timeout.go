@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	fh "github.com/orgware/fasthttp"
+	fh "github.com/oarkflow/fasthttp"
 )
 
 func New(d time.Duration) fh.HandlerFunc {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	fh "github.com/orgware/fasthttp"
-	"github.com/orgware/fasthttp/middleware/compress"
+	fh "github.com/oarkflow/fasthttp"
+	"github.com/oarkflow/fasthttp/middleware/compress"
 )
 
 func TestStaticFileServing(t *testing.T) {

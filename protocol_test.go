@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orgware/fasthttp/internal/hpack"
+	"github.com/oarkflow/fasthttp/internal/hpack"
 )
 
 type singleListener struct {
