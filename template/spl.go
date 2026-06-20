@@ -76,6 +76,11 @@ func (e *SPLEngine) Config(cfg SPLConfig) *SPLEngine {
 	return e
 }
 
+// RuntimeJS returns the JavaScript runtime for SPL hydration.
+func (e *SPLEngine) RuntimeJS() string {
+	return e.engine.RuntimeJS()
+}
+
 // Render implements fasthttp.TemplateEngine.
 func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string) error {
 	if e.cfg.Reload {
@@ -88,6 +93,12 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 			return fmt.Errorf("spl: data must be map[string]any, got %T", data)
 		}
 		binding = make(map[string]any)
+	}
+
+	for k, v := range e.engine.Globals {
+		if _, exists := binding[k]; !exists {
+			binding[k] = v
+		}
 	}
 
 	if !strings.HasSuffix(name, e.extension) {

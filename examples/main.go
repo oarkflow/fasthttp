@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	fh "github.com/orgware/fasthttp"
 	"github.com/orgware/fasthttp/middleware"
+	"github.com/orgware/fasthttp/template"
 )
 
 //go:embed public
@@ -26,6 +28,14 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	// 1. APP CONFIG + CREATION
 	// ──────────────────────────────────────────────────────────────────────
+	splEngine := template.NewSPL("examples/views")
+	splEngine.Config(template.SPLConfig{
+		Directory:  "examples/views",
+		Reload:     true,
+		SSR:        true,
+		Globals:    map[string]any{"siteName": "SPL Fasthttp Demo"},
+	})
+
 	app := fh.New(fh.Config{
 		ReadTimeout:         10 * time.Second,
 		WriteTimeout:        10 * time.Second,
@@ -34,6 +44,7 @@ func main() {
 		ReadBufferSize:      8192,
 		MaxRequestBodySize:  4 * 1024 * 1024,
 		DisableKeepAlive:    false,
+		TemplateEngine:      splEngine,
 	})
 
 	// ──────────────────────────────────────────────────────────────────────
@@ -88,8 +99,56 @@ func main() {
 	// 4. ALL HTTP METHODS
 	// ──────────────────────────────────────────────────────────────────────
 
+	type Country struct {
+		Code   string
+		Name   string
+		Region string
+	}
+	type Role struct {
+		Value       string
+		Label       string
+		Permissions []string
+	}
+	type Priority string
+	type FormConfig struct {
+		MaxBioLength int
+		MinAge       int
+		MaxAge       int
+		AllowSignup  bool
+	}
+
 	app.Get("/", func(ctx *fh.Ctx) error {
-		return ctx.SendString("Hello World!")
+		return ctx.Render("index", map[string]any{
+			"title": "SPL Template Engine &mdash; Fasthttp Demo",
+			"countries": []Country{
+				{Code: "us", Name: "United States", Region: "Americas"},
+				{Code: "uk", Name: "United Kingdom", Region: "Europe"},
+				{Code: "ca", Name: "Canada", Region: "Americas"},
+				{Code: "au", Name: "Australia", Region: "Oceania"},
+				{Code: "de", Name: "Germany", Region: "Europe"},
+				{Code: "jp", Name: "Japan", Region: "Asia"},
+				{Code: "in", Name: "India", Region: "Asia"},
+			},
+			"roles": []Role{
+				{Value: "developer", Label: "Developer", Permissions: []string{"read", "write", "deploy"}},
+				{Value: "designer", Label: "Designer", Permissions: []string{"read", "write"}},
+				{Value: "manager", Label: "Project Manager", Permissions: []string{"read", "write", "admin"}},
+				{Value: "devops", Label: "DevOps Engineer", Permissions: []string{"read", "write", "deploy", "admin"}},
+			},
+			"priorities": []Priority{"low", "medium", "high", "critical"},
+			"config": FormConfig{
+				MaxBioLength: 280,
+				MinAge:       0,
+				MaxAge:       150,
+				AllowSignup:  true,
+			},
+			"regionColors": map[string]string{
+				"Americas": "#3b82f6",
+				"Europe":   "#22c55e",
+				"Asia":     "#f59e0b",
+				"Oceania":  "#a855f7",
+			},
+		})
 	})
 
 	app.Get("/get", func(ctx *fh.Ctx) error {
@@ -148,6 +207,11 @@ func main() {
 		Compress:   true,
 		Browse:     true,
 		StripSlash: true,
+	})
+	app.Get("/static/spl-runtime.min.js", func(ctx *fh.Ctx) error {
+		ctx.Set("Content-Type", "application/javascript")
+		ctx.Set("Cache-Control", "public, max-age=31536000, immutable")
+		return ctx.SendString(splEngine.RuntimeJS())
 	})
 	app.Get("/search", func(ctx *fh.Ctx) error {
 		q := ctx.Query("q")
@@ -368,6 +432,74 @@ func main() {
 			"uptime":     time.Since(startTime).String(),
 			"start_time": startTime.Format(time.RFC3339),
 		})
+	})
+
+	// ──────────────────────────────────────────────────────────────────────
+	// 16. SPL TEMPLATE API ENDPOINTS
+	// ──────────────────────────────────────────────────────────────────────
+	app.Post("/api/submit", func(ctx *fh.Ctx) error {
+		var payload map[string]any
+		if err := ctx.BodyParser(&payload); err != nil {
+			return ctx.Status(400).JSON(map[string]any{"error": "Invalid JSON", "success": false})
+		}
+		return ctx.JSON(map[string]any{
+			"success":   true,
+			"message":   "Form submitted successfully!",
+			"id":        fmt.Sprintf("SUB-%d", 1000+len(payload)),
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
+	})
+
+	var (
+		quoteMu  sync.Mutex
+		quoteIdx int
+	)
+	app.Get("/api/quote", func(ctx *fh.Ctx) error {
+		quotes := []map[string]string{
+			{"text": "The only way to do great work is to love what you do.", "author": "Steve Jobs"},
+			{"text": "Code is like humor. When you have to explain it, it's bad.", "author": "Cory House"},
+			{"text": "First, solve the problem. Then, write the code.", "author": "John Johnson"},
+			{"text": "Simplicity is the soul of efficiency.", "author": "Austin Freeman"},
+			{"text": "Make it work, make it right, make it fast.", "author": "Kent Beck"},
+		}
+		quoteMu.Lock()
+		idx := quoteIdx % len(quotes)
+		quoteIdx++
+		quoteMu.Unlock()
+		return ctx.JSON(quotes[idx])
+	})
+
+	var (
+		todoMu     sync.Mutex
+		todos      []map[string]any
+		todoNextID int
+	)
+	app.Get("/api/todos", func(ctx *fh.Ctx) error {
+		todoMu.Lock()
+		list := todos
+		todoMu.Unlock()
+		if list == nil {
+			list = []map[string]any{}
+		}
+		return ctx.JSON(list)
+	})
+	app.Post("/api/todos", func(ctx *fh.Ctx) error {
+		var form map[string]any
+		if err := ctx.BodyParser(&form); err != nil {
+			return ctx.Status(400).JSON(map[string]any{"error": "Invalid JSON"})
+		}
+		todoMu.Lock()
+		todoNextID++
+		todos = append(todos, map[string]any{
+			"id":       todoNextID,
+			"title":    form["title"],
+			"priority": form["priority"],
+			"notes":    form["notes"],
+		})
+		list := make([]map[string]any, len(todos))
+		copy(list, todos)
+		todoMu.Unlock()
+		return ctx.Status(201).JSON(list)
 	})
 
 	// ──────────────────────────────────────────────────────────────────────
