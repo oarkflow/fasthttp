@@ -66,7 +66,9 @@ func NewSPL(directory string, extension ...string) *SPLEngine {
 func (e *SPLEngine) Config(cfg SPLConfig) *SPLEngine {
 	e.cfg = cfg
 	e.engine.BaseDir = cfg.Directory
-	e.engine.SecureMode = cfg.SecureMode
+	if cfg.SecureMode {
+		e.engine.SecureMode = true
+	}
 	e.engine.AutoEscape = true
 	for k, v := range cfg.Globals {
 		e.engine.Globals[k] = v
@@ -126,7 +128,7 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 		if err != nil {
 			return fmt.Errorf("spl: render %s with layout %s: %w", name, layoutName, err)
 		}
-		_, err = io.WriteString(w, out)
+		_, err = io.WriteString(w, moveScriptsInsideBody(out))
 		return err
 	}
 
@@ -140,6 +142,21 @@ func (e *SPLEngine) Render(w io.Writer, name string, data any, layout ...string)
 	if err != nil {
 		return fmt.Errorf("spl: render %s: %w", name, err)
 	}
-	_, err = io.WriteString(w, out)
+	_, err = io.WriteString(w, moveScriptsInsideBody(out))
 	return err
+}
+
+// moveScriptsInsideBody moves hydration script tags from after </html>
+// to just before </body>, ensuring valid HTML structure.
+func moveScriptsInsideBody(s string) string {
+	const marker = `<script type="application/json" data-spl-hydration>`
+	idx := strings.LastIndex(s, marker)
+	if idx < 0 {
+		return s
+	}
+	bodyIdx := strings.LastIndex(s, `</body>`)
+	if bodyIdx < 0 || bodyIdx > idx {
+		return s
+	}
+	return s[:bodyIdx] + s[idx:] + s[bodyIdx:idx]
 }

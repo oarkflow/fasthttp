@@ -151,6 +151,131 @@ func TestSPLEngineCustomExtension(t *testing.T) {
 	}
 }
 
+func TestSPLEngineSSRWithLayout(t *testing.T) {
+	dir := t.TempDir()
+	layout := "<html><body>@block(\"content\"){default}</body></html>"
+	err := os.WriteFile(filepath.Join(dir, "layout.html"), []byte(layout), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := `@extends("layout.html")@define("content"){@signal(count = 5)<h1>${count}</h1>@click("inc", count, "inc", "1")}`
+	err = os.WriteFile(filepath.Join(dir, "page.html"), []byte(page), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewSPL(dir)
+	engine.Config(SPLConfig{
+		Directory: dir,
+		SSR:       true,
+	})
+
+	out := &bytes.Buffer{}
+	err = engine.Render(out, "page", nil, "layout.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.String()
+
+	if !strings.Contains(result, "5") {
+		t.Fatalf("expected signal value '5' in output, got %q", result)
+	}
+	if !strings.Contains(result, "data-spl-hydration") {
+		t.Fatalf("expected hydration script in output, got %q", result)
+	}
+
+	// Verify hydration scripts are before </body>
+	bodyIdx := strings.LastIndex(result, "</body>")
+	hydIdx := strings.LastIndex(result, "data-spl-hydration")
+	if hydIdx > bodyIdx {
+		t.Fatalf("hydration script should be before </body>, found at %d, body at %d", hydIdx, bodyIdx)
+	}
+}
+
+func TestSPLEngineSSRWithoutLayout(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := `<html><body>@signal(count = 3)<h1>${count}</h1>@click("inc", count, "inc", "1")</body></html>`
+	err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(tmpl), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewSPL(dir)
+	engine.Config(SPLConfig{
+		Directory: dir,
+		SSR:       true,
+	})
+
+	out := &bytes.Buffer{}
+	err = engine.Render(out, "page", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.String()
+
+	if !strings.Contains(result, "3") {
+		t.Fatalf("expected signal value '3' in output, got %q", result)
+	}
+	if !strings.Contains(result, "data-spl-hydration") {
+		t.Fatalf("expected hydration script in output, got %q", result)
+	}
+
+	bodyIdx := strings.LastIndex(result, "</body>")
+	hydIdx := strings.LastIndex(result, "data-spl-hydration")
+	if hydIdx > bodyIdx {
+		t.Fatalf("hydration script should be before </body>, found at %d, body at %d", hydIdx, bodyIdx)
+	}
+}
+
+func TestSPLEngineSSRNoBodyTag(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := `@signal(count = 7)<h1>${count}</h1>@click("inc", count, "inc", "1")`
+	err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(tmpl), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewSPL(dir)
+	engine.Config(SPLConfig{
+		Directory: dir,
+		SSR:       true,
+	})
+
+	out := &bytes.Buffer{}
+	err = engine.Render(out, "page", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.String()
+
+	if !strings.Contains(result, "7") {
+		t.Fatalf("expected signal value '7' in output, got %q", result)
+	}
+	if !strings.Contains(result, "data-spl-hydration") {
+		t.Fatalf("expected hydration script in output, got %q", result)
+	}
+}
+
+func TestSPLEngineNonSSRUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	tmpl := `<html><body><h1>Hello</h1></body></html>`
+	err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(tmpl), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewSPL(dir)
+	out := &bytes.Buffer{}
+	err = engine.Render(out, "page", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != tmpl {
+		t.Fatalf("non-SSR output should be unchanged, got %q", out.String())
+	}
+}
+
 func TestSPLEngineReload(t *testing.T) {
 	dir := t.TempDir()
 	err := os.WriteFile(filepath.Join(dir, "reload.html"), []byte("v1"), 0644)

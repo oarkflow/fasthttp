@@ -96,29 +96,28 @@
         <label style="font-size:0.8rem;font-weight:600;color:#475569;">Priority</label>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem;">
           <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-            <input type="radio" name="priority" value="low" on:click="prefs.priority='low'" />
+            <input type="radio" name="priority" value="low" data-spl-model="prefs.priority" />
             <span class="badge badge-green">Low</span>
           </label>
           <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-            <input type="radio" name="priority" value="medium" checked on:click="prefs.priority='medium'" />
+            <input type="radio" name="priority" value="medium" data-spl-model="prefs.priority" checked />
             <span class="badge badge-amber">Medium</span>
           </label>
           <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-            <input type="radio" name="priority" value="high" on:click="prefs.priority='high'" />
+            <input type="radio" name="priority" value="high" data-spl-model="prefs.priority" />
             <span class="badge badge-red">High</span>
           </label>
           <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;">
-            <input type="radio" name="priority" value="critical" on:click="prefs.priority='critical'" />
+            <input type="radio" name="priority" value="critical" data-spl-model="prefs.priority" />
             <span class="badge badge-purple">CRITICAL</span>
           </label>
         </div>
       </div>
     <div style="margin-top:0.75rem;">
       <div style="display:flex;gap:1.5rem;flex-wrap:wrap;">
-        @let(checkboxes = [{"model":"prefs.newsletter","text":"Newsletter"},{"model":"prefs.notifications","text":"Notifications"},{"model":"prefs.terms","text":"Accept terms"}])
-        @for(cb in checkboxes) {
-          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="${cb.model}" /> ${cb.text}</label>
-        }
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.newsletter" checked /> Newsletter</label>
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.notifications" checked /> Notifications</label>
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.8rem;"><input type="checkbox" data-spl-model="prefs.terms" /> Accept terms</label>
       </div>
     </div>
     <button on:click="submitted=true" style="margin-top:0.75rem;padding:0.45rem 1.25rem;border-radius:0.375rem;border:none;background:#3b82f6;color:white;font-weight:600;cursor:pointer;">Submit</button>
@@ -133,6 +132,10 @@
       <strong>Email:</strong><span>${personal.email}</span>
       <strong>Role:</strong><span>${prefs.role}</span>
       <strong>Priority:</strong><span style="text-transform:uppercase">${prefs.priority}</span>
+      <strong>Notifications:</strong>
+	  	<span style="text-transform:uppercase">Newsletter => ${prefs.newsletter}</span>
+	  	<span style="text-transform:uppercase">Notifications => ${prefs.notifications}</span>
+	  	<span style="text-transform:uppercase">Terms => ${prefs.terms}</span>
     </div>}
   </div>
 </div>

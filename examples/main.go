@@ -41,9 +41,10 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	splEngine := template.NewSPL("examples/views")
 	splEngine.Config(template.SPLConfig{
-		Directory: "examples/views",
-		SSR:       true,
-		Globals:   map[string]any{"siteName": "SPL Fasthttp Demo"},
+		Directory:  "examples/views",
+		SSR:        true,
+		SecureMode: true,
+		Globals:    map[string]any{"siteName": "SPL Fasthttp Demo"},
 	})
 
 	app := fh.New(fh.Config{
