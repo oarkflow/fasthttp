@@ -1,8 +1,10 @@
 package fasthttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -369,6 +371,19 @@ func (c *Ctx) JSON(v any) error {
 	}
 	c.contentType = jsonCT
 	return c.writeResponse(b)
+}
+
+func (c *Ctx) Render(name string, data any, layout ...string) error {
+	engine := c.server.cfg.TemplateEngine
+	if engine == nil {
+		return errors.New("fasthttp: no template engine configured")
+	}
+	var buf bytes.Buffer
+	if err := engine.Render(&buf, name, data, layout...); err != nil {
+		return err
+	}
+	c.contentType = []byte("text/html; charset=utf-8")
+	return c.writeResponse(buf.Bytes())
 }
 
 func (c *Ctx) SendStatus(code int) error {

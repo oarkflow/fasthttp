@@ -44,6 +44,7 @@ type Config struct {
 	DisableHTTP2         bool
 	ErrorHandler         func(*Ctx, error)
 	Logger               *log.Logger
+	TemplateEngine       TemplateEngine
 }
 
 var defaultConfig = Config{
@@ -118,6 +119,7 @@ func New(config ...Config) *App {
 		cfg.DisableHTTP2 = c.DisableHTTP2
 		cfg.ErrorHandler = c.ErrorHandler
 		cfg.Logger = c.Logger
+		cfg.TemplateEngine = c.TemplateEngine
 	}
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = defaultErrorHandler
