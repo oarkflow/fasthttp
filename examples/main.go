@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -14,6 +16,9 @@ import (
 	fh "github.com/orgware/fasthttp"
 	"github.com/orgware/fasthttp/middleware"
 )
+
+//go:embed public
+var publicFiles embed.FS
 
 var startTime = time.Now()
 
@@ -132,8 +137,15 @@ func main() {
 			"sha":  ctx.Param("sha"),
 		})
 	})
-	app.Get("/static/*", func(ctx *fh.Ctx) error {
-		return ctx.SendString("path: " + ctx.Param("*"))
+	subFS, _ := fs.Sub(publicFiles, "public")
+	app.Static("/static", "./public", fh.StaticConfig{
+		Compress: true,
+		MaxAge:   3600,
+		Browse:   true,
+	})
+	app.StaticFS("/embed", subFS, fh.StaticConfig{
+		Compress: true,
+		Browse:   true,
 	})
 	app.Get("/search", func(ctx *fh.Ctx) error {
 		q := ctx.Query("q")
@@ -236,6 +248,10 @@ func main() {
 	})
 	app.Get("/send-bytes", func(ctx *fh.Ctx) error {
 		return ctx.Send([]byte("raw bytes"))
+	})
+	app.Get("/html", func(ctx *fh.Ctx) error {
+		html := `<h1>Hello fasthttp</h1><p>HTML response with <code>Type()</code> and <code>SendString()</code>.</p>`
+		return ctx.Type("text/html; charset=utf-8").SendString(html)
 	})
 	app.Get("/type", func(ctx *fh.Ctx) error {
 		return ctx.Type("text/csv").SendString("a,b,c\n1,2,3")
