@@ -109,7 +109,7 @@ func readChunkedBody(conn net.Conn, initial []byte, maxBody int, timeout time.Du
 		if colon <= 0 || !validToken(line[:colon]) || len(trailers) >= maxHeaders {
 			return nil, nil, nil, ErrInvalidChunkedBody
 		}
-		if bytesEqualFold(line[:colon], HeaderContentLength) || bytesEqualFold(line[:colon], HeaderTransferEncoding) || bytesEqualFold(line[:colon], HeaderHost) {
+		if bytesEqualFold(line[:colon], HeaderContentLengthBytes) || bytesEqualFold(line[:colon], HeaderTransferEncodingBytes) || bytesEqualFold(line[:colon], HeaderHostBytes) {
 			return nil, nil, nil, ErrInvalidChunkedBody
 		}
 		key := append([]byte(nil), line[:colon]...)

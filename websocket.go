@@ -32,7 +32,9 @@ func WriteAll(w io.Writer, b []byte) error {
 // Hijack runs handler synchronously on the raw HTTP/1.x connection.
 // Reads first consume bytes already buffered after the request.
 // The handler owns the protocol conversation until it returns.
-func (c *Ctx) Hijack(handler func(net.Conn) error) error {
+// The provided ResponseConn has WriteHeader, SetHeader, and Write methods for
+// clean HTTP response construction — use StatusText and header constants.
+func (c *Ctx) Hijack(handler func(*ResponseConn) error) error {
 	if c.h2 != nil {
 		return ErrHijackHTTP2
 	}
@@ -51,7 +53,7 @@ func (c *Ctx) Hijack(handler func(net.Conn) error) error {
 
 	_ = c.conn.SetDeadline(time.Time{})
 
-	return handler(&prefixedConn{
+	return handler(&ResponseConn{
 		Conn:   c.conn,
 		prefix: c.upgradeBuffered,
 	})
@@ -66,7 +68,7 @@ func (c *Ctx) Upgrade(protocol string, handler func(net.Conn) error) error {
 	if c.responded ||
 		len(protocol) == 0 ||
 		!validToken([]byte(protocol)) ||
-		!hasHeaderToken(c.Header.Peek(HeaderConnection), "upgrade") ||
+		!hasHeaderToken(c.Header.Peek(HeaderConnectionBytes), "upgrade") ||
 		!strEqFold(trimOWS(c.Header.Peek([]byte("Upgrade"))), protocol) ||
 		handler == nil {
 		return ErrInvalidUpgrade

@@ -235,6 +235,21 @@ func (c *Ctx) parseQuery() {
 
 func (c *Ctx) Body() []byte { return c.body }
 
+// QueryParser decodes the query string into v. The target type should be
+// *map[string]any for unstructured access; struct decoding is not yet supported.
+// QueryParser decodes the query string into v. Supports the same formats
+// as form-encoded bodies (nested keys via bracket notation, arrays, etc.).
+// Target should be *map[string]any or *any.
+func (c *Ctx) QueryParser(v any) error {
+	uri := c.Header.URI
+	qi := indexByte(uri, '?')
+	if qi < 0 {
+		return nil
+	}
+	var fc formCodec
+	return fc.Unmarshal(uri[qi+1:], v)
+}
+
 // Trailer returns a decoded chunked request trailer by name.
 func (c *Ctx) Trailer(name string) string {
 	for i := range c.trailers {
@@ -265,6 +280,13 @@ func (c *Ctx) SetTrailer(key, value string) {
 }
 
 func (c *Ctx) BodyParser(v any) error {
+	ct := b2s(c.Header.ContentType)
+	if codec := matchCodec(ct); codec != nil {
+		if cta, ok := codec.(ContentTypeAwareCodec); ok {
+			return cta.UnmarshalWithContentType(c.body, ct, v)
+		}
+		return codec.Unmarshal(c.body, v)
+	}
 	return json.Unmarshal(c.body, v)
 }
 
@@ -349,10 +371,10 @@ func (c *Ctx) Set(key, value string) {
 	if !validToken(k) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
-	if bytesEqualFold(k, HeaderContentLength) || bytesEqualFold(k, HeaderTransferEncoding) || bytesEqualFold(k, HeaderConnection) {
+	if bytesEqualFold(k, HeaderContentLengthBytes) || bytesEqualFold(k, HeaderTransferEncodingBytes) || bytesEqualFold(k, HeaderConnectionBytes) {
 		return
 	}
-	if bytesEqualFold(k, HeaderContentType) {
+	if bytesEqualFold(k, HeaderContentTypeBytes) {
 		c.contentType = v
 		return
 	}
@@ -535,7 +557,7 @@ func (c *Ctx) writeResponseString(s string) error {
 	buf = append(buf, '\r', '\n')
 
 	// Body — append string directly, no []byte conversion
-	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEAD) {
+	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
 		buf = append(buf, s...)
 	}
 
@@ -608,7 +630,7 @@ func (c *Ctx) writeResponse(body []byte) error {
 	buf = append(buf, '\r', '\n')
 
 	// RFC 9110: a HEAD response has the same headers as GET but no content.
-	if bodyAllowed && len(body) > 0 && !bytesEqualFold(c.Header.Method, MethodHEAD) {
+	if bodyAllowed && len(body) > 0 && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
 		buf = append(buf, body...)
 	}
 
@@ -647,48 +669,11 @@ func appendExtraHeaders(buf []byte, headers []Header) []byte {
 
 // appendStatusLine writes "HTTP/1.1 <code> <text>\r\n" to buf.
 func appendStatusLine(buf []byte, code int) []byte {
-	switch code {
-	case 200:
-		return append(buf, "HTTP/1.1 200 OK\r\n"...)
-	case 201:
-		return append(buf, "HTTP/1.1 201 Created\r\n"...)
-	case 204:
-		return append(buf, "HTTP/1.1 204 No Content\r\n"...)
-	case 301:
-		return append(buf, "HTTP/1.1 301 Moved Permanently\r\n"...)
-	case 302:
-		return append(buf, "HTTP/1.1 302 Found\r\n"...)
-	case 304:
-		return append(buf, "HTTP/1.1 304 Not Modified\r\n"...)
-	case 400:
-		return append(buf, "HTTP/1.1 400 Bad Request\r\n"...)
-	case 401:
-		return append(buf, "HTTP/1.1 401 Unauthorized\r\n"...)
-	case 403:
-		return append(buf, "HTTP/1.1 403 Forbidden\r\n"...)
-	case 404:
-		return append(buf, "HTTP/1.1 404 Not Found\r\n"...)
-	case 405:
-		return append(buf, "HTTP/1.1 405 Method Not Allowed\r\n"...)
-	case 409:
-		return append(buf, "HTTP/1.1 409 Conflict\r\n"...)
-	case 422:
-		return append(buf, "HTTP/1.1 422 Unprocessable Entity\r\n"...)
-	case 429:
-		return append(buf, "HTTP/1.1 429 Too Many Requests\r\n"...)
-	case 500:
-		return append(buf, "HTTP/1.1 500 Internal Server Error\r\n"...)
-	case 502:
-		return append(buf, "HTTP/1.1 502 Bad Gateway\r\n"...)
-	case 503:
-		return append(buf, "HTTP/1.1 503 Service Unavailable\r\n"...)
-	default:
-		buf = append(buf, "HTTP/1.1 "...)
-		buf = appendInt(buf, code)
-		buf = append(buf, ' ')
-		buf = append(buf, statusText(code)...)
-		return append(buf, '\r', '\n')
-	}
+	buf = append(buf, "HTTP/1.1 "...)
+	buf = appendInt(buf, code)
+	buf = append(buf, ' ')
+	buf = append(buf, StatusReason(code)...)
+	return append(buf, '\r', '\n')
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -744,136 +729,6 @@ func unhex(c byte) int {
 	return -1
 }
 
-func statusText(code int) string {
-	switch code {
-	case 100:
-		return "Continue"
-	case 101:
-		return "Switching Protocols"
-	case 102:
-		return "Processing"
-	case 103:
-		return "Early Hints"
-	case 200:
-		return "OK"
-	case 201:
-		return "Created"
-	case 202:
-		return "Accepted"
-	case 203:
-		return "Non-Authoritative Information"
-	case 204:
-		return "No Content"
-	case 205:
-		return "Reset Content"
-	case 206:
-		return "Partial Content"
-	case 207:
-		return "Multi-Status"
-	case 208:
-		return "Already Reported"
-	case 226:
-		return "IM Used"
-	case 300:
-		return "Multiple Choices"
-	case 301:
-		return "Moved Permanently"
-	case 302:
-		return "Found"
-	case 303:
-		return "See Other"
-	case 304:
-		return "Not Modified"
-	case 305:
-		return "Use Proxy"
-	case 307:
-		return "Temporary Redirect"
-	case 308:
-		return "Permanent Redirect"
-	case 400:
-		return "Bad Request"
-	case 401:
-		return "Unauthorized"
-	case 402:
-		return "Payment Required"
-	case 403:
-		return "Forbidden"
-	case 404:
-		return "Not Found"
-	case 405:
-		return "Method Not Allowed"
-	case 406:
-		return "Not Acceptable"
-	case 407:
-		return "Proxy Authentication Required"
-	case 408:
-		return "Request Timeout"
-	case 409:
-		return "Conflict"
-	case 410:
-		return "Gone"
-	case 411:
-		return "Length Required"
-	case 412:
-		return "Precondition Failed"
-	case 413:
-		return "Content Too Large"
-	case 414:
-		return "URI Too Long"
-	case 415:
-		return "Unsupported Media Type"
-	case 416:
-		return "Range Not Satisfiable"
-	case 417:
-		return "Expectation Failed"
-	case 418:
-		return "I'm a teapot"
-	case 421:
-		return "Misdirected Request"
-	case 422:
-		return "Unprocessable Entity"
-	case 423:
-		return "Locked"
-	case 424:
-		return "Failed Dependency"
-	case 425:
-		return "Too Early"
-	case 426:
-		return "Upgrade Required"
-	case 428:
-		return "Precondition Required"
-	case 429:
-		return "Too Many Requests"
-	case 431:
-		return "Request Header Fields Too Large"
-	case 451:
-		return "Unavailable For Legal Reasons"
-	case 500:
-		return "Internal Server Error"
-	case 501:
-		return "Not Implemented"
-	case 502:
-		return "Bad Gateway"
-	case 503:
-		return "Service Unavailable"
-	case 504:
-		return "Gateway Timeout"
-	case 505:
-		return "HTTP Version Not Supported"
-	case 506:
-		return "Variant Also Negotiates"
-	case 507:
-		return "Insufficient Storage"
-	case 508:
-		return "Loop Detected"
-	case 510:
-		return "Not Extended"
-	case 511:
-		return "Network Authentication Required"
-	default:
-		return "Unknown"
-	}
-}
+
 
 var jsonCT = []byte("application/json")
-var headerLocation = []byte("Location")

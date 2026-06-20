@@ -251,11 +251,11 @@ func NewWithConfig(cfg Config, handler func(*Conn) error) fh.HandlerFunc {
 }
 
 func isValidWebSocketRequest(c *fh.Ctx) bool {
-	return fh.BytesEqualFold(c.Header.Method, fh.MethodGET) &&
+	return fh.BytesEqualFold(c.Header.Method, fh.MethodGETBytes) &&
 		c.Header.ContentLength == 0 &&
 		!c.Header.Chunked &&
 		fh.StrEqFold(fh.TrimOWS(c.Header.Peek([]byte("Upgrade"))), "websocket") &&
-		fh.HasHeaderToken(c.Header.Peek(fh.HeaderConnection), "upgrade") &&
+		fh.HasHeaderToken(c.Header.Peek(fh.HeaderConnectionBytes), "upgrade") &&
 		fh.StrEqFold(fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Version"))), "13") &&
 		len(fh.TrimOWS(c.Header.Peek([]byte("Sec-WebSocket-Key")))) > 0
 }

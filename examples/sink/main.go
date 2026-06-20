@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log"
@@ -373,6 +375,40 @@ func main() {
 			"path":   ctx.Path(),
 		})
 	})
+	app.Post("/body-form", func(ctx *fh.Ctx) error {
+		var data map[string]any
+		if err := ctx.BodyParser(&data); err != nil {
+			return ctx.Status(400).SendString("bad form: " + err.Error())
+		}
+		return ctx.JSON(data)
+	})
+	app.Get("/query-parse", func(ctx *fh.Ctx) error {
+		var q map[string]any
+		if err := ctx.QueryParser(&q); err != nil {
+			return ctx.Status(400).SendString("query error: " + err.Error())
+		}
+		return ctx.JSON(q)
+	})
+	// ──────────────────────────────────────────────────────────────────────
+	// 7b. CUSTOM CODEC EXAMPLE
+	// ──────────────────────────────────────────────────────────────────────
+	// 7b. CUSTOM CODEC EXAMPLE
+	// ──────────────────────────────────────────────────────────────────────
+	// RegisterCodec is called at init time (simulated here).
+	// In a real app, register custom codecs in an init() function or
+	// at the start of main().
+	fh.RegisterCodec(customCodec{})
+	app.Post("/custom-codec", func(ctx *fh.Ctx) error {
+		var s string
+		if err := ctx.BodyParser(&s); err != nil {
+			return ctx.Status(400).SendString("bad custom: " + err.Error())
+		}
+		return ctx.SendString("custom: " + s)
+	})
+
+	// ──────────────────────────────────────────────────────────────────────
+	// 7c. TRAILERS (request + response)
+	// ──────────────────────────────────────────────────────────────────────
 	app.Post("/trailer", func(ctx *fh.Ctx) error {
 		return ctx.SendString("trailer: " + ctx.Trailer("X-Checksum"))
 	})
@@ -474,13 +510,40 @@ func main() {
 		return ctx.SendStream(strings.NewReader("streamed content"))
 	})
 
+	// Trailers with streaming — compute a SHA-256 checksum over the body
+	// and send it as a trailer after the final chunk. The Trailer header is
+	// announced automatically from SetTrailer calls.
+	app.Get("/stream-trailer", func(ctx *fh.Ctx) error {
+		hash := sha256.New()
+		return ctx.Stream(func(w *fh.StreamWriter) error {
+			for i := range 3 {
+				chunk := fmt.Appendf(nil, "chunk-%d payload\n", i+1)
+				hash.Write(chunk)
+				if _, err := w.Write(chunk); err != nil {
+					return err
+				}
+			}
+			ctx.SetTrailer("X-Content-SHA256", hex.EncodeToString(hash.Sum(nil)))
+			return nil
+		})
+	})
+
+	// Non-streaming trailers — set before SendString.
+	app.Get("/trailer-nonstream", func(ctx *fh.Ctx) error {
+		ctx.SetTrailer("X-Checksum", "sha256=abc123def456")
+		ctx.SetTrailer("X-Processing-Time", "42ms")
+		return ctx.SendString("trailers set on non-streaming response")
+	})
+
 	// ──────────────────────────────────────────────────────────────────────
 	// 13. HIJACK + UPGRADE
 	// ──────────────────────────────────────────────────────────────────────
 	app.Get("/hijack", func(ctx *fh.Ctx) error {
-		return ctx.Hijack(func(conn net.Conn) error {
+		return ctx.Hijack(func(conn *fh.ResponseConn) error {
 			defer conn.Close()
-			conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhijacked!\n"))
+			conn.SetHeader(fh.HeaderContentTypeBytes, fh.MimeTextPlainBytes)
+			conn.WriteHeader(fh.StatusOK)
+			conn.Write([]byte("hijacked!\n"))
 			return nil
 		})
 	})
@@ -641,6 +704,26 @@ func main() {
 	if err := app.Listen(addr); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// customCodec demonstrates how to register a custom body codec.
+type customCodec struct{}
+
+func (customCodec) ContentType() string { return "application/vnd.myapp+custom" }
+
+func (customCodec) Unmarshal(data []byte, v any) error {
+	if len(data) == 0 {
+		return nil
+	}
+	switch dst := v.(type) {
+	case *string:
+		*dst = "custom(" + string(data) + ")"
+		return nil
+	case *any:
+		*dst = map[string]string{"custom": string(data)}
+		return nil
+	}
+	return fmt.Errorf("custom: unsupported target type %T", v)
 }
 
 func parseFormValue(body, key string) string {

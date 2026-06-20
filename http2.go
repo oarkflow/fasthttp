@@ -649,7 +649,7 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 	}
 	c.responded = true
 	r.trailers = append([]Header(nil), c.responseTrailers...)
-	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, MethodHEAD)
+	bodyAllowed := responseBodyAllowed(c.status) && !bytesEqualFold(c.Header.Method, MethodHEADBytes)
 	length := len(body)
 	end := (!bodyAllowed || length == 0) && len(r.trailers) == 0
 	var contentLength *int
@@ -678,7 +678,7 @@ func (r *h2Response) beginStream(c *Ctx) error {
 		return net.ErrClosed
 	}
 	r.trailers = c.responseTrailers
-	end := (!responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEAD)) && len(r.trailers) == 0
+	end := (!responseBodyAllowed(c.status) || bytesEqualFold(c.Header.Method, MethodHEADBytes)) && len(r.trailers) == 0
 	if err := r.conn.sendResponseHeaders(r.stream, c, nil, end); err != nil {
 		r.abort(h2InternalError)
 		return err

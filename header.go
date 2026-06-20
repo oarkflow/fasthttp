@@ -5,66 +5,72 @@ import (
 	"errors"
 )
 
-// Common header names as byte slices — avoids repeated string→[]byte conversions.
+// Common header names, methods, and protocol strings as []byte.
+// Used internally for zero-allocation comparisons. String variants (Str suffix)
+// are available for user-facing APIs like ctx.Set().
 var (
-	HeaderContentType      = []byte("Content-Type")
-	HeaderContentLength    = []byte("Content-Length")
-	HeaderConnection       = []byte("Connection")
-	HeaderTransferEncoding = []byte("Transfer-Encoding")
-	HeaderHost             = []byte("Host")
-	HeaderServer           = []byte("Server")
-	HeaderDate             = []byte("Date")
-	HeaderCacheControl     = []byte("Cache-Control")
-	HeaderUserAgent        = []byte("User-Agent")
-	HeaderAuthorization    = []byte("Authorization")
-	HeaderAccept           = []byte("Accept")
-	HeaderAcceptEncoding   = []byte("Accept-Encoding")
-	HeaderAcceptLanguage   = []byte("Accept-Language")
-	HeaderContentEncoding  = []byte("Content-Encoding")
-	HeaderContentDisposition = []byte("Content-Disposition")
-	HeaderLocation         = []byte("Location")
-	HeaderSetCookie        = []byte("Set-Cookie")
-	HeaderCookie           = []byte("Cookie")
-	HeaderETag             = []byte("ETag")
-	HeaderLastModified     = []byte("Last-Modified")
-	HeaderIfNoneMatch      = []byte("If-None-Match")
-	HeaderIfModifiedSince  = []byte("If-Modified-Since")
-	HeaderIfRange          = []byte("If-Range")
-	HeaderRange            = []byte("Range")
-	HeaderContentRange     = []byte("Content-Range")
-	HeaderAcceptRanges     = []byte("Accept-Ranges")
-	HeaderVary             = []byte("Vary")
-	HeaderAllow            = []byte("Allow")
-	HeaderWWWAuthenticate  = []byte("WWW-Authenticate")
-	HeaderUpgrade          = []byte("Upgrade")
-	HeaderOrigin           = []byte("Origin")
-	HeaderReferer          = []byte("Referer")
-	HeaderXRequestedWith   = []byte("X-Requested-With")
-	HeaderStrictTransportSecurity = []byte("Strict-Transport-Security")
-	HeaderXContentTypeOptions     = []byte("X-Content-Type-Options")
-	HeaderXFrameOptions           = []byte("X-Frame-Options")
-	HeaderXXSSProtection          = []byte("X-XSS-Protection")
-	HeaderContentSecurityPolicy    = []byte("Content-Security-Policy")
-	HeaderReferrerPolicy          = []byte("Referrer-Policy")
-	HeaderPermissionsPolicy        = []byte("Permissions-Policy")
-	HeaderTrailer                  = []byte("Trailer")
-	HeaderExpect                   = []byte("Expect")
-	HeaderHTTP2Settings            = []byte("HTTP2-Settings")
-
-	MethodGET     = []byte("GET")
-	MethodPOST    = []byte("POST")
-	MethodPUT     = []byte("PUT")
-	MethodDELETE  = []byte("DELETE")
-	MethodPATCH   = []byte("PATCH")
-	MethodHEAD    = []byte("HEAD")
-	MethodCONNECT = []byte("CONNECT")
-	MethodOPTIONS = []byte("OPTIONS")
-	MethodTRACE   = []byte("TRACE")
 
 	strHTTP11     = []byte("HTTP/1.1")
 	strHTTP10     = []byte("HTTP/1.0")
 	strCRLF       = []byte("\r\n")
 	strColonSpace = []byte(": ")
+)
+
+// String variants of header/method constants for user-facing APIs.
+const (
+	HeaderContentTypeStr      = "Content-Type"
+	HeaderContentLengthStr    = "Content-Length"
+	HeaderConnectionStr       = "Connection"
+	HeaderTransferEncodingStr = "Transfer-Encoding"
+	HeaderHostStr             = "Host"
+	HeaderServerStr           = "Server"
+	HeaderDateStr             = "Date"
+	HeaderCacheControlStr     = "Cache-Control"
+	HeaderUserAgentStr        = "User-Agent"
+	HeaderAuthorizationStr    = "Authorization"
+	HeaderAcceptStr           = "Accept"
+	HeaderAcceptEncodingStr   = "Accept-Encoding"
+	HeaderAcceptLanguageStr   = "Accept-Language"
+	HeaderContentEncodingStr  = "Content-Encoding"
+	HeaderContentDispositionStr = "Content-Disposition"
+	HeaderLocationStr         = "Location"
+	HeaderSetCookieStr        = "Set-Cookie"
+	HeaderCookieStr           = "Cookie"
+	HeaderETagStr             = "ETag"
+	HeaderLastModifiedStr     = "Last-Modified"
+	HeaderIfNoneMatchStr      = "If-None-Match"
+	HeaderIfModifiedSinceStr  = "If-Modified-Since"
+	HeaderIfRangeStr          = "If-Range"
+	HeaderRangeStr            = "Range"
+	HeaderContentRangeStr     = "Content-Range"
+	HeaderAcceptRangesStr     = "Accept-Ranges"
+	HeaderVaryStr             = "Vary"
+	HeaderAllowStr            = "Allow"
+	HeaderWWWAuthenticateStr  = "WWW-Authenticate"
+	HeaderUpgradeStr          = "Upgrade"
+	HeaderOriginStr           = "Origin"
+	HeaderRefererStr          = "Referer"
+	HeaderXRequestedWithStr   = "X-Requested-With"
+	HeaderStrictTransportSecurityStr = "Strict-Transport-Security"
+	HeaderXContentTypeOptionsStr     = "X-Content-Type-Options"
+	HeaderXFrameOptionsStr           = "X-Frame-Options"
+	HeaderXXSSProtectionStr          = "X-XSS-Protection"
+	HeaderContentSecurityPolicyStr    = "Content-Security-Policy"
+	HeaderReferrerPolicyStr          = "Referrer-Policy"
+	HeaderPermissionsPolicyStr        = "Permissions-Policy"
+	HeaderTrailerStr                  = "Trailer"
+	HeaderExpectStr                   = "Expect"
+	HeaderHTTP2SettingsStr            = "HTTP2-Settings"
+
+	MethodGETStr     = "GET"
+	MethodPOSTStr    = "POST"
+	MethodPUTStr     = "PUT"
+	MethodDELETEStr  = "DELETE"
+	MethodPATCHStr   = "PATCH"
+	MethodHEADStr    = "HEAD"
+	MethodCONNECTStr = "CONNECT"
+	MethodOPTIONSStr = "OPTIONS"
+	MethodTRACEStr   = "TRACE"
 )
 
 // ErrMalformedRequest is returned when the request cannot be parsed.
@@ -132,7 +138,7 @@ func (h *RequestHeader) Peek(name []byte) []byte {
 			return h.headers[i].Value
 		}
 	}
-	if bytesEqualFold(name, HeaderHost) {
+	if bytesEqualFold(name, HeaderHostBytes) {
 		return h.Host
 	}
 	return nil
@@ -205,10 +211,10 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		}
 	}
 	validTarget := len(h.URI) > 0 && h.URI[0] == '/'
-	if bytesEqualFold(h.Method, MethodOPTIONS) && bytes.Equal(h.URI, []byte("*")) {
+	if bytesEqualFold(h.Method, MethodOPTIONSBytes) && bytes.Equal(h.URI, []byte("*")) {
 		validTarget = true
 	}
-	if bytesEqualFold(h.Method, []byte("CONNECT")) && len(h.URI) > 0 && bytes.IndexByte(h.URI, '/') < 0 {
+	if bytesEqualFold(h.Method, MethodCONNECTBytes) && len(h.URI) > 0 && bytes.IndexByte(h.URI, '/') < 0 {
 		validTarget = true
 	}
 	if !validTarget {
@@ -290,27 +296,27 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 
 		// store well-known headers directly
 		switch {
-		case bytesEqualFold(key, HeaderHost):
+		case bytesEqualFold(key, HeaderHostBytes):
 			if seenHost {
 				return 0, ErrMalformedRequest
 			}
 			seenHost = true
 			h.Host = val
-		case bytesEqualFold(key, HeaderContentType):
+		case bytesEqualFold(key, HeaderContentTypeBytes):
 			h.ContentType = val
-		case bytesEqualFold(key, HeaderContentLength):
+		case bytesEqualFold(key, HeaderContentLengthBytes):
 			n, ok := parseContentLength(val)
 			if !ok || (h.HasContentLength && n != h.ContentLength) {
 				return 0, ErrMalformedRequest
 			}
 			h.ContentLength, h.HasContentLength = n, true
-		case bytesEqualFold(key, HeaderConnection):
+		case bytesEqualFold(key, HeaderConnectionBytes):
 			if hasHeaderToken(val, "close") {
 				h.KeepAlive = false
 			} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
 				h.KeepAlive = true
 			}
-		case bytesEqualFold(key, HeaderTransferEncoding):
+		case bytesEqualFold(key, HeaderTransferEncodingBytes):
 			if seenTransferEncoding {
 				return 0, ErrMalformedRequest
 			}
