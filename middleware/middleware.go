@@ -23,12 +23,114 @@ import (
 
 // LoggerConfig configures the logger middleware.
 type LoggerConfig struct {
-	// Format: use ${method}, ${path}, ${status}, ${latency}, ${ip}
 	Format string
 	Logger *log.Logger
 }
 
-// Logger logs each request. Uses no allocations for fixed-format output.
+type logTokenType uint8
+
+const (
+	logText logTokenType = iota
+	logMethod
+	logPath
+	logStatus
+	logLatency
+	logIP
+)
+
+type logToken struct {
+	typ  logTokenType
+	text string
+}
+
+func parseLogFormat(format string) []logToken {
+	tokens := make([]logToken, 0, 8)
+	i := 0
+	for i < len(format) {
+		if format[i] == '$' && i+2 < len(format) && format[i+1] == '{' {
+			end := strings.IndexByte(format[i:], '}')
+			if end < 0 {
+				tokens = append(tokens, logToken{typ: logText, text: format[i:]})
+				break
+			}
+			name := format[i+2 : i+end]
+			switch name {
+			case "method":
+				tokens = append(tokens, logToken{typ: logMethod})
+			case "path":
+				tokens = append(tokens, logToken{typ: logPath})
+			case "status":
+				tokens = append(tokens, logToken{typ: logStatus})
+			case "latency":
+				tokens = append(tokens, logToken{typ: logLatency})
+			case "ip":
+				tokens = append(tokens, logToken{typ: logIP})
+			default:
+				tokens = append(tokens, logToken{typ: logText, text: format[i:i+end+1]})
+			}
+			i += end + 1
+		} else {
+			start := i
+			for i < len(format) && !(format[i] == '$' && i+2 < len(format) && format[i+1] == '{') {
+				i++
+			}
+			tokens = append(tokens, logToken{typ: logText, text: format[start:i]})
+		}
+	}
+	return tokens
+}
+
+func appendInt(buf *bytes.Buffer, n int) {
+	if n < 1000 {
+		switch n {
+		case 0:
+			buf.WriteByte('0')
+			return
+		case 1:
+			buf.WriteByte('1')
+			return
+		case 2:
+			buf.WriteByte('2')
+			return
+		case 3:
+			buf.WriteByte('3')
+			return
+		case 4:
+			buf.WriteByte('4')
+			return
+		case 5:
+			buf.WriteByte('5')
+			return
+		case 6:
+			buf.WriteByte('6')
+			return
+		case 7:
+			buf.WriteByte('7')
+			return
+		case 8:
+			buf.WriteByte('8')
+			return
+		case 9:
+			buf.WriteByte('9')
+			return
+		}
+	}
+	var s [10]byte
+	i := len(s)
+	for n > 0 || i == len(s) {
+		i--
+		s[i] = byte('0' + n%10)
+		n /= 10
+	}
+	buf.Write(s[i:])
+}
+
+var logBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// Logger logs each request. The format string is compiled once at setup time;
+// at runtime, output is built with a single pass using a pooled buffer.
 func Logger(config ...LoggerConfig) fh.HandlerFunc {
 	cfg := LoggerConfig{
 		Format: "[${ip}] ${method} ${path} → ${status} (${latency})\n",
@@ -40,27 +142,60 @@ func Logger(config ...LoggerConfig) fh.HandlerFunc {
 	if logger == nil {
 		logger = log.Default()
 	}
+	tokens := parseLogFormat(cfg.Format)
 
 	return func(ctx *fh.Ctx) error {
 		start := time.Now()
 		err := ctx.Next()
 		lat := time.Since(start)
 
-		out := cfg.Format
-		out = strings.ReplaceAll(out, "${method}", ctx.Method())
-		out = strings.ReplaceAll(out, "${path}", ctx.Path())
-		out = strings.ReplaceAll(out, "${status}", strconv.Itoa(ctx.StatusCode()))
-		out = strings.ReplaceAll(out, "${latency}", lat.String())
-		out = strings.ReplaceAll(out, "${ip}", ctx.IP())
+		buf := logBufPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		buf.Grow(len(cfg.Format) + 64)
 
-		logger.Print(out)
+		for _, t := range tokens {
+			switch t.typ {
+			case logText:
+				buf.WriteString(t.text)
+			case logMethod:
+				buf.Write(ctx.Header.Method)
+			case logPath:
+				uri := ctx.Header.URI
+				if q := bytes.IndexByte(uri, '?'); q >= 0 {
+					buf.Write(uri[:q])
+				} else {
+					buf.Write(uri)
+				}
+			case logStatus:
+				appendInt(buf, ctx.StatusCode())
+			case logLatency:
+				us := lat.Microseconds()
+				var lb [16]byte
+				n := len(lb)
+				for us > 0 {
+					n--
+					lb[n] = byte('0' + us%10)
+					us /= 10
+				}
+				if n == len(lb) {
+					lb[len(lb)-1] = '0'
+					n = len(lb) - 1
+				}
+				buf.Write(lb[n:])
+				buf.WriteString("µs")
+			case logIP:
+				buf.WriteString(ctx.IP())
+			}
+		}
+		logger.Output(2, buf.String())
+		buf.Reset()
+		logBufPool.Put(buf)
 		return err
 	}
 }
 
 // ── Recover ────────────────────────────────────────────────────────────────
 
-// Recover catches panics from downstream handlers and converts them to 500 errors.
 func Recover() fh.HandlerFunc {
 	return func(ctx *fh.Ctx) (err error) {
 		defer func() {
@@ -75,13 +210,12 @@ func Recover() fh.HandlerFunc {
 
 // ── CORS ───────────────────────────────────────────────────────────────────
 
-// CORSConfig configures the CORS middleware.
 type CORSConfig struct {
 	AllowOrigins     []string
 	AllowMethods     []string
 	AllowHeaders     []string
 	AllowCredentials bool
-	MaxAge           int // seconds
+	MaxAge           int
 }
 
 var defaultCORSConfig = CORSConfig{
@@ -91,7 +225,6 @@ var defaultCORSConfig = CORSConfig{
 	MaxAge:       86400,
 }
 
-// CORS handles cross-origin requests.
 func CORS(config ...CORSConfig) fh.HandlerFunc {
 	cfg := defaultCORSConfig
 	if len(config) > 0 {
@@ -129,13 +262,19 @@ func CORS(config ...CORSConfig) fh.HandlerFunc {
 		if cfg.AllowCredentials {
 			ctx.Set("Access-Control-Allow-Credentials", "true")
 		}
-		if ctx.Method() == "OPTIONS" && ctx.Get("Access-Control-Request-Method") != "" {
+		if len(ctx.Header.Method) == 7 &&
+			ctx.Header.Method[0] == 'O' &&
+			ctx.Header.Method[1] == 'P' &&
+			ctx.Header.Method[2] == 'T' &&
+			ctx.Header.Method[3] == 'I' &&
+			ctx.Header.Method[4] == 'O' &&
+			ctx.Header.Method[5] == 'N' &&
+			ctx.Header.Method[6] == 'S' && ctx.Get("Access-Control-Request-Method") != "" {
 			ctx.Set("Access-Control-Allow-Methods", methods)
 			ctx.Set("Access-Control-Allow-Headers", headers)
 			ctx.Set("Access-Control-Max-Age", maxAge)
 			return ctx.SendStatus(204)
 		}
-
 		return ctx.Next()
 	}
 }
@@ -145,13 +284,17 @@ func CORS(config ...CORSConfig) fh.HandlerFunc {
 var ridCounter uint64
 var ridPrefix = strconv.FormatInt(time.Now().UnixNano(), 36)
 
-// RequestID attaches a unique X-Request-ID to every request.
 func RequestID() fh.HandlerFunc {
 	return func(ctx *fh.Ctx) error {
 		id := ctx.Get("X-Request-ID")
 		if id == "" {
 			n := atomic.AddUint64(&ridCounter, 1)
-			id = ridPrefix + "-" + strconv.FormatUint(n, 36)
+			var buf [64]byte
+			m := copy(buf[:], ridPrefix)
+			buf[m] = '-'
+			m++
+			m += len(strconv.AppendUint(buf[m:m], n, 36))
+			id = string(buf[:m])
 		}
 		ctx.Set("X-Request-ID", id)
 		ctx.Locals("requestID", id)
@@ -161,10 +304,9 @@ func RequestID() fh.HandlerFunc {
 
 // ── Rate Limiter ───────────────────────────────────────────────────────────
 
-// RateLimiterConfig configures the rate limiter middleware.
 type RateLimiterConfig struct {
-	Max          int           // requests per Window
-	Window       time.Duration // sliding window size
+	Max          int
+	Window       time.Duration
 	KeyFunc      func(*fh.Ctx) string
 	LimitReached func(*fh.Ctx) error
 }
@@ -175,7 +317,6 @@ type rateBucket struct {
 	resetAt time.Time
 }
 
-// RateLimiter limits requests per key (default: per IP).
 func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 	if config.Max <= 0 {
 		config.Max = 100
@@ -192,6 +333,8 @@ func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 			return ctx.Status(429).SendString("Too Many Requests")
 		}
 	}
+
+	maxStr := strconv.Itoa(config.Max)
 
 	var mu sync.RWMutex
 	buckets := make(map[string]*rateBucket, 1024)
@@ -222,14 +365,13 @@ func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 			mu.Lock()
 			b = buckets[key]
 			if b == nil {
-				b = &rateBucket{resetAt: time.Now().Add(config.Window)}
+				b = &rateBucket{resetAt: now.Add(config.Window)}
 				buckets[key] = b
 			}
 			mu.Unlock()
 		}
 
 		b.mu.Lock()
-		now = time.Now()
 		if now.After(b.resetAt) {
 			b.count = 0
 			b.resetAt = now.Add(config.Window)
@@ -238,52 +380,20 @@ func RateLimiter(config RateLimiterConfig) fh.HandlerFunc {
 		count := b.count
 		b.mu.Unlock()
 
-		ctx.Set("X-RateLimit-Limit", strconv.Itoa(config.Max))
-		ctx.Set("X-RateLimit-Remaining", strconv.Itoa(max(0, config.Max-count)))
+		ctx.Set("X-RateLimit-Limit", maxStr)
+		rem := config.Max - count
+		if rem < 0 {
+			rem = 0
+		}
+		var remBuf [10]byte
+		remStr := string(strconv.AppendInt(remBuf[:0], int64(rem), 10))
+		ctx.Set("X-RateLimit-Remaining", remStr)
 
 		if count > config.Max {
 			return config.LimitReached(ctx)
 		}
-
 		return ctx.Next()
 	}
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func acceptsEncoding(header, encoding string) bool {
-	found, quality, wildcardQuality := false, 0.0, -1.0
-	for _, item := range strings.Split(header, ",") {
-		parts := strings.Split(item, ";")
-		name := strings.TrimSpace(parts[0])
-		q := 1.0
-		for _, parameter := range parts[1:] {
-			kv := strings.SplitN(strings.TrimSpace(parameter), "=", 2)
-			if len(kv) == 2 && strings.EqualFold(kv[0], "q") {
-				parsed, err := strconv.ParseFloat(kv[1], 64)
-				if err != nil || parsed < 0 || parsed > 1 {
-					q = 0
-				} else {
-					q = parsed
-				}
-			}
-		}
-		if strings.EqualFold(name, encoding) {
-			found, quality = true, q
-		}
-		if name == "*" {
-			wildcardQuality = q
-		}
-	}
-	if found {
-		return quality > 0
-	}
-	return wildcardQuality > 0
 }
 
 // ── Compress ───────────────────────────────────────────────────────────────
@@ -295,16 +405,12 @@ var gzipPool = sync.Pool{
 	},
 }
 
-// Compress adds gzip compression for responses when the client accepts it.
-// Uses pooled gzip writers. Streaming handlers are buffered before compression
-// so the wire representation is never mislabeled.
 func Compress() fh.HandlerFunc {
 	return func(ctx *fh.Ctx) error {
 		ae := ctx.Get("Accept-Encoding")
-		if !acceptsEncoding(ae, "gzip") {
+		if !acceptsGzip(ae) {
 			return ctx.Next()
 		}
-		// Mark response for compression; actual compression done via wrapper
 		ctx.Set("Content-Encoding", "gzip")
 		ctx.Append("Vary", "Accept-Encoding")
 		ctx.TransformBody(func(body []byte) ([]byte, error) {
@@ -327,9 +433,95 @@ func Compress() fh.HandlerFunc {
 	}
 }
 
+func acceptsGzip(header string) bool {
+	var foundGzip, gzipOK, foundStar, starOK bool
+
+	i := 0
+	for i < len(header) {
+		for i < len(header) && (header[i] == ',' || header[i] == ' ') {
+			i++
+		}
+		if i >= len(header) {
+			break
+		}
+		start := i
+		for i < len(header) && header[i] != ';' && header[i] != ',' && header[i] != ' ' {
+			i++
+		}
+		name := header[start:i]
+
+		for i < len(header) && header[i] == ' ' {
+			i++
+		}
+
+		qZero := false
+		if i < len(header) && header[i] == ';' {
+			i++
+			qZero = isQZero(header[i:])
+		}
+
+		for i < len(header) && header[i] != ',' {
+			i++
+		}
+		if i < len(header) {
+			i++
+		}
+
+		if strings.EqualFold(name, "gzip") {
+			foundGzip = true
+			gzipOK = !qZero
+		} else if len(name) == 1 && name[0] == '*' {
+			foundStar = true
+			starOK = !qZero
+		}
+	}
+
+	if foundGzip {
+		return gzipOK
+	}
+	if foundStar {
+		return starOK
+	}
+	return false
+}
+
+func isQZero(s string) bool {
+	for len(s) > 0 && s[0] == ' ' {
+		s = s[1:]
+	}
+	if len(s) < 3 || (s[0] != 'q' && s[0] != 'Q') || s[1] != '=' {
+		return false
+	}
+	s = s[2:]
+	for len(s) > 0 && s[0] == ' ' {
+		s = s[1:]
+	}
+	if len(s) == 0 {
+		return false
+	}
+	if s[0] != '0' {
+		return false
+	}
+	if len(s) == 1 {
+		return true
+	}
+	if s[1] != '.' {
+		return true
+	}
+	for i := 2; i < len(s); i++ {
+		c := s[i]
+		if c == ',' || c == ';' || c == ' ' {
+			return true
+		}
+		if c != '0' {
+			return false
+		}
+	}
+	return true
+}
+
 // ── BasicAuth ──────────────────────────────────────────────────────────────
 
-// BasicAuth returns a middleware that validates HTTP Basic Auth.
 func BasicAuth(username, password string) fh.HandlerFunc {
 	expected := "Basic " + base64Encode(username+":"+password)
 	return func(ctx *fh.Ctx) error {
@@ -344,16 +536,11 @@ func BasicAuth(username, password string) fh.HandlerFunc {
 
 // ── Timeout ────────────────────────────────────────────────────────────────
 
-// Timeout returns a middleware that enforces a per-handler deadline.
-// If the handler doesn't complete in time, a 503 is returned.
 func Timeout(d time.Duration) fh.HandlerFunc {
 	return func(ctx *fh.Ctx) error {
 		deadline, cancel := context.WithTimeout(ctx.Context(), d)
 		defer cancel()
 		ctx.SetContext(deadline)
-		// Go cannot safely preempt arbitrary handler code. Downstream work must
-		// observe ctx.Context(); running it concurrently would permit writes to
-		// a recycled request context after a timeout response.
 		err := ctx.Next()
 		if errors.Is(deadline.Err(), context.DeadlineExceeded) && !ctx.Responded() {
 			return ctx.Status(503).SendString("Request Timeout")
@@ -364,7 +551,6 @@ func Timeout(d time.Duration) fh.HandlerFunc {
 
 // ── IP Whitelist ───────────────────────────────────────────────────────────
 
-// IPWhitelist restricts access to a list of CIDRs or IPs.
 func IPWhitelist(allowed ...string) fh.HandlerFunc {
 	networks := make([]*net.IPNet, 0, len(allowed))
 	ips := make([]net.IP, 0, len(allowed))

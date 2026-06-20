@@ -88,13 +88,47 @@ func (h *RequestHeader) Peek(name []byte) []byte {
 	return nil
 }
 
-// PeekStr returns header value as string (allocates — use for non-hot paths).
+// PeekStr returns header value as string (allocates once for the string return).
 func (h *RequestHeader) PeekStr(name string) string {
-	v := h.Peek([]byte(name))
+	v := h.peekStr(name)
 	if v == nil {
 		return ""
 	}
 	return string(v)
+}
+
+func (h *RequestHeader) peekStr(name string) []byte {
+	for i := 0; i < h.hcount; i++ {
+		if strBytesEqualFold(name, h.headers[i].Key) {
+			return h.headers[i].Value
+		}
+	}
+	if len(name) == 4 && (name[0]|0x20 == 'h') && (name[1]|0x20 == 'o') && (name[2]|0x20 == 's') && (name[3]|0x20 == 't') {
+		return h.Host
+	}
+	return nil
+}
+
+func strBytesEqualFold(a string, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ca, cb := a[i], b[i]
+		if ca == cb {
+			continue
+		}
+		if ca >= 'A' && ca <= 'Z' {
+			ca |= 0x20
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb |= 0x20
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
 
 // parseRequestLine parses "METHOD URI HTTP/1.x\r\n".

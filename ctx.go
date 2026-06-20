@@ -31,6 +31,7 @@ type Ctx struct {
 	requestContext  context.Context
 	bodyTransform   func([]byte) ([]byte, error)
 	h2              *h2Response
+	cachedIP        string
 
 	handlers     []HandlerFunc
 	handlerIndex int
@@ -111,6 +112,7 @@ func (c *Ctx) reset() {
 	c.queryParams = c.queryParams[:0]
 	c.handlers = nil
 	c.handlerIndex = 0
+	c.cachedIP = ""
 }
 
 // Next continues the current middleware chain. A handler may return without
@@ -254,11 +256,16 @@ func (c *Ctx) Locals(key string, value ...any) any {
 }
 
 func (c *Ctx) IP() string {
+	if c.cachedIP != "" {
+		return c.cachedIP
+	}
 	addr := c.conn.RemoteAddr().String()
 	if host, _, err := net.SplitHostPort(addr); err == nil {
-		return host
+		c.cachedIP = host
+	} else {
+		c.cachedIP = strings.Trim(addr, "[]")
 	}
-	return strings.Trim(addr, "[]")
+	return c.cachedIP
 }
 
 // ── Response builders ──────────────────────────────────────────────────────
