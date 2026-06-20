@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	fh "github.com/orgware/fasthttp"
-	"github.com/orgware/fasthttp/middleware"
+	"github.com/orgware/fasthttp/middleware/compress"
 )
 
 func TestStaticFileServing(t *testing.T) {
@@ -515,7 +515,7 @@ func TestStaticInlineCompressionWithMiddleware(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "data.txt"), []byte(content), 0644)
 
 	app := fh.New()
-	app.Use(middleware.Compress())
+	app.Use(compress.New())
 	app.Static("/static", dir, fh.StaticConfig{
 		Compress: true,
 	})

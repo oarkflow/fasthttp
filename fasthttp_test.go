@@ -12,7 +12,12 @@ import (
 	"time"
 
 	fh "github.com/orgware/fasthttp"
-	"github.com/orgware/fasthttp/middleware"
+	"github.com/orgware/fasthttp/middleware/compress"
+	"github.com/orgware/fasthttp/middleware/cors"
+	"github.com/orgware/fasthttp/middleware/recover"
+	"github.com/orgware/fasthttp/middleware/requestid"
+	"github.com/orgware/fasthttp/middleware/security"
+	"github.com/orgware/fasthttp/middleware/timeout"
 )
 
 // testServer starts the app on a random port and returns the address.
@@ -303,7 +308,7 @@ func TestLocals(t *testing.T) {
 
 func TestPanicRecovery(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.Recover())
+	app.Use(recover.New())
 	app.Get("/panic", func(ctx *fh.Ctx) error {
 		panic("test panic")
 	})
@@ -316,7 +321,7 @@ func TestPanicRecovery(t *testing.T) {
 
 func TestSecurityHeaders(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.SecurityHeaders())
+	app.Use(security.New())
 	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
@@ -337,7 +342,6 @@ func TestSecurityHeaders(t *testing.T) {
 		{"X-XSS-Protection", "X-XSS-Protection: 0"},
 		{"Referrer-Policy", "Referrer-Policy: no-referrer"},
 		{"Strict-Transport-Security", "Strict-Transport-Security: max-age=31536000; includeSubDomains"},
-		{"Content-Security-Policy", "Content-Security-Policy:"},
 		{"Permissions-Policy", "Permissions-Policy:"},
 	}
 	for _, c := range checks {
@@ -345,11 +349,14 @@ func TestSecurityHeaders(t *testing.T) {
 			t.Errorf("missing response header %q", c.name)
 		}
 	}
+	if strings.Contains(s, "Content-Security-Policy:") {
+		t.Error("Content-Security-Policy should not be set by default")
+	}
 }
 
 func TestSecurityHeadersCustom(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.SecurityHeaders(middleware.SecurityConfig{
+	app.Use(security.New(security.Config{
 		FrameDeny:          false,
 		ContentTypeNosniff: false,
 		HSTSMaxAge:         0,
@@ -378,7 +385,7 @@ func TestSecurityHeadersCustom(t *testing.T) {
 
 func TestCORS(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.CORS())
+	app.Use(cors.New())
 	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
@@ -395,7 +402,7 @@ func TestCORS(t *testing.T) {
 
 func TestRequestID(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.RequestID())
+	app.Use(requestid.New())
 	app.Get("/", func(ctx *fh.Ctx) error {
 		return ctx.SendString("ok")
 	})
@@ -412,7 +419,7 @@ func TestRequestID(t *testing.T) {
 
 func TestCompressionNegotiationAndStreaming(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.Compress())
+	app.Use(compress.New())
 	app.Get("/compressed", func(ctx *fh.Ctx) error {
 		return ctx.Stream(func(w *fh.StreamWriter) error {
 			_, _ = w.Write([]byte("hello "))
@@ -443,7 +450,7 @@ func TestCompressionNegotiationAndStreaming(t *testing.T) {
 
 func TestCooperativeTimeout(t *testing.T) {
 	app := fh.New()
-	app.Use(middleware.Timeout(5 * time.Millisecond))
+	app.Use(timeout.New(5 * time.Millisecond))
 	app.Get("/timeout", func(ctx *fh.Ctx) error { <-ctx.Context().Done(); return nil })
 	addr := testServer(t, app)
 	code, _ := doRequest(t, addr, "GET", "/timeout", "", nil)

@@ -15,7 +15,16 @@ import (
 	"time"
 
 	fh "github.com/orgware/fasthttp"
-	"github.com/orgware/fasthttp/middleware"
+	"github.com/orgware/fasthttp/middleware/basicauth"
+	"github.com/orgware/fasthttp/middleware/compress"
+	"github.com/orgware/fasthttp/middleware/cors"
+	"github.com/orgware/fasthttp/middleware/ipwhitelist"
+	"github.com/orgware/fasthttp/middleware/logger"
+	"github.com/orgware/fasthttp/middleware/ratelimiter"
+	"github.com/orgware/fasthttp/middleware/recover"
+	"github.com/orgware/fasthttp/middleware/requestid"
+	"github.com/orgware/fasthttp/middleware/security"
+	"github.com/orgware/fasthttp/middleware/timeout"
 	"github.com/orgware/fasthttp/template"
 )
 
@@ -70,24 +79,24 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	// 3. GLOBAL MIDDLEWARE
 	// ──────────────────────────────────────────────────────────────────────
-	app.Use(middleware.Logger(middleware.LoggerConfig{
+	app.Use(logger.New(logger.Config{
 		Format: "[${ip}] ${method} ${path} → ${status} (${latency})\n",
 	}))
-	app.Use(middleware.SecurityHeaders())
-	app.Use(middleware.RequestID())
-	app.Use(middleware.Recover())
-	app.Use(middleware.CORS(middleware.CORSConfig{
+	app.Use(security.New())
+	app.Use(requestid.New())
+	app.Use(recover.New())
+	app.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH"},
 		AllowHeaders:     []string{"Content-Type", "Authorization"},
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}))
-	app.Use(middleware.RateLimiter(middleware.RateLimiterConfig{
+	app.Use(ratelimiter.New(ratelimiter.Config{
 		Max:    100,
 		Window: time.Minute,
 	}))
-	app.Use(middleware.Compress())
+	app.Use(compress.New())
 
 	// Per-request start time via Locals
 	app.Use(func(ctx *fh.Ctx) error {
@@ -237,9 +246,9 @@ func main() {
 	})
 
 	admin := v1.Group("/admin",
-		middleware.BasicAuth("admin", "secret"),
-		middleware.IPWhitelist("127.0.0.1", "::1"),
-		middleware.Timeout(5*time.Second),
+		basicauth.New("admin", "secret"),
+		ipwhitelist.New("127.0.0.1", "::1"),
+		timeout.New(5*time.Second),
 	)
 	admin.Get("/stats", func(ctx *fh.Ctx) error {
 		return ctx.JSON(map[string]string{"status": "admin only"})
