@@ -532,7 +532,7 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 	seen := make(map[string]bool, 4)
 	cookies := ""
 	for _, f := range fields {
-		if f.Name == "" || strings.ToLower(f.Name) != f.Name || strings.IndexAny(f.Value, "\x00\r\n") >= 0 {
+		if f.Name == "" || strings.ToLower(f.Name) != f.Name || strings.ContainsAny(f.Value, "\x00\r\n") {
 			return errors.New("uppercase header")
 		}
 		if strings.HasPrefix(f.Name, ":") {
