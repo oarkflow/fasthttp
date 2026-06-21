@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,22 +164,39 @@ func main() {
 	app.Static("/uploads", "./uploads", fh.StaticConfig{})
 
 	app.Get("/", func(c *fh.Ctx) error {
-		return c.Render("upload", map[string]any{
-			"title":        "File Upload with Reactivity",
-			"uploadResult": nil,
-		})
+		data := map[string]any{"title": "File Upload with Reactivity"}
+
+		if savedName := c.Query("file"); savedName != "" {
+			sz, _ := strconv.ParseInt(c.Query("size"), 10, 64)
+			data["uploadResult"] = map[string]any{
+				"success":      true,
+				"originalName": c.Query("name"),
+				"savedName":    savedName,
+				"size":         sz,
+				"mimeType":     c.Query("mime"),
+				"url":          "/uploads/" + savedName,
+				"uploadedAt":   time.Now().Format(time.RFC3339),
+			}
+		} else if errMsg := c.Query("error"); errMsg != "" {
+			data["uploadResult"] = map[string]any{
+				"success": false,
+				"error":   errMsg,
+			}
+		} else {
+			data["uploadResult"] = nil
+		}
+
+		return c.Render("upload", data)
 	})
 
 	app.Post("/upload", func(c *fh.Ctx) error {
 		file, err := c.FormFile("file")
 		if err != nil {
-			return c.Render("upload", map[string]any{
-				"title": "File Upload with Reactivity",
-				"uploadResult": map[string]any{
-					"success": false,
-					"error":   fmt.Sprintf("Failed to read file: %v", err),
-				},
-			})
+			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
+		}
+
+		if err := os.MkdirAll("uploads", 0755); err != nil {
+			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
 		}
 
 		timestamp := time.Now().UnixMilli()
@@ -185,13 +204,7 @@ func main() {
 		dstPath := filepath.Join("uploads", savedName)
 
 		if err := c.SaveFile(file, dstPath); err != nil {
-			return c.Render("upload", map[string]any{
-				"title": "File Upload with Reactivity",
-				"uploadResult": map[string]any{
-					"success": false,
-					"error":   fmt.Sprintf("Failed to save file: %v", err),
-				},
-			})
+			return c.Redirect("/?error=" + url.QueryEscape(err.Error()))
 		}
 
 		contentType := file.Header.Get("Content-Type")
@@ -199,18 +212,12 @@ func main() {
 			contentType = "application/octet-stream"
 		}
 
-		return c.Render("upload", map[string]any{
-			"title": "File Upload with Reactivity",
-			"uploadResult": map[string]any{
-				"success":      true,
-				"originalName": file.FileName,
-				"savedName":    savedName,
-				"size":         file.Size,
-				"mimeType":     contentType,
-				"url":          "/uploads/" + savedName,
-				"uploadedAt":   time.Now().Format(time.RFC3339),
-			},
-		})
+		q := url.Values{}
+		q.Set("file", savedName)
+		q.Set("name", file.FileName)
+		q.Set("size", strconv.FormatInt(file.Size, 10))
+		q.Set("mime", contentType)
+		return c.Redirect("/?" + q.Encode())
 	})
 
 	addr := ":8082"
