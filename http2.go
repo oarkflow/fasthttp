@@ -42,16 +42,29 @@ const (
 	h2ProtocolError    = uint32(1)
 	h2InternalError    = uint32(2)
 	h2FlowControlError = uint32(3)
-	h2StreamClosed     = uint32(5)
+	h2ErrSettingsTimeout = uint32(4)
+	h2ErrStreamClosed  = uint32(5)
 	h2FrameSizeError   = uint32(6)
 	h2RefusedStream    = uint32(7)
 	h2Cancel           = uint32(8)
 	h2CompressionError = uint32(9)
 	h2EnhanceYourCalm  = uint32(11)
+	h2InadequateSecurity = uint32(12)
 
-	h2InitialWindow = int64(65535)
-	h2DefaultFrame  = uint32(16384)
-	h2MaxWindow     = int64(1<<31 - 1)
+	stateIdle             = 0
+	stateOpen             = 1
+	stateHalfClosedRemote = 2
+	stateHalfClosedLocal  = 3
+	stateClosed           = 4
+
+	h2InitialWindow   = int64(65535)
+	h2DefaultFrame    = uint32(16384)
+	h2MaxWindow       = int64(1<<31 - 1)
+	h2SettingsTimeout = 10 * time.Second
+
+	maxContinuationFrames = 64
+	maxRSTStreamPerMinute = 60
+	windowsUpdateThreshold = h2InitialWindow / 2
 )
 
 type h2Frame struct {
@@ -91,6 +104,16 @@ type h2Conn struct {
 	peerMaxFrame      atomic.Uint32
 	peerMaxHeaderList atomic.Uint32
 	upgradeStream     *h2Stream
+
+	// Per-connection buffered flow control window counters for batching
+	connRecvWindow     int64
+
+	// Rapid reset protection
+	resetCount    int
+	resetWindowStart time.Time
+
+	// SETTINGS ACK timeout
+	settingsTimer *time.Timer
 }
 
 type h2Stream struct {
@@ -104,6 +127,8 @@ type h2Stream struct {
 	body             []byte
 	sendWindow       int64
 	recvWindow       int64
+	recvWindowAccum  int64
+	state            atomic.Int32
 	dispatched       bool
 	ended            bool
 	reset            atomic.Bool
@@ -127,6 +152,7 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 		streamSem:         make(chan struct{}, maxH2ConcurrentStreams(app)),
 		connSendWindow:    h2InitialWindow,
 		peerInitialWindow: h2InitialWindow,
+		resetWindowStart:  time.Now(),
 	}
 	h.peerMaxFrame.Store(h2DefaultFrame)
 	h.peerMaxHeaderList.Store(^uint32(0))
@@ -202,6 +228,15 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 	if err := h.sendSettings(); err != nil {
 		return
 	}
+	// Start SETTINGS ACK timeout (RFC 9113 §6.5.3)
+	h.settingsTimer = time.AfterFunc(h2SettingsTimeout, func() {
+		h.connectionError(h2ErrSettingsTimeout)
+	})
+	defer func() {
+		if h.settingsTimer != nil {
+			h.settingsTimer.Stop()
+		}
+	}()
 	if !prefaceConsumed {
 		if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
 			_ = h.conn.SetReadDeadline(time.Now().Add(timeout))
@@ -215,6 +250,7 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 		}
 	}
 	first := true
+	upgradeDispatched := false
 	for {
 		f, err := h.readFrame()
 		if err != nil {
@@ -236,7 +272,8 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 			}
 			return
 		}
-		if first == false && h.upgradeStream != nil {
+		if !upgradeDispatched && h.upgradeStream != nil {
+			upgradeDispatched = true
 			s := h.upgradeStream
 			h.upgradeStream = nil
 			h.dispatch(s)
@@ -294,14 +331,13 @@ func (h *h2Conn) readFrame() (h2Frame, error) {
 	}
 
 	length := int(head[0])<<16 | int(head[1])<<8 | int(head[2])
-	if length > int(h2DefaultFrame) {
+	maxFrame := int(h.peerMaxFrame.Load())
+	if length > maxFrame {
 		return h2Frame{}, h2ConnError{h2FrameSizeError}
 	}
 
-	streamID := binary.BigEndian.Uint32(head[5:9])
-	if streamID&0x80000000 != 0 {
-		return h2Frame{}, h2ConnError{h2ProtocolError}
-	}
+	// RFC 9113 §4.1: reserved bit (MSB of stream identifier) must be ignored
+	streamID := binary.BigEndian.Uint32(head[5:9]) & 0x7fffffff
 
 	if cap(h.frameBuf) < length {
 		h.frameBuf = make([]byte, length)
@@ -344,6 +380,10 @@ func (h *h2Conn) handleFrame(f h2Frame) error {
 		if f.streamID == 0 || len(f.payload) != 4 {
 			return h2ConnError{h2FrameSizeError}
 		}
+		// Rapid reset protection (RFC 9113 §6.4)
+		if !h.allowRST() {
+			return h2ConnError{h2EnhanceYourCalm}
+		}
 		h.mu.Lock()
 		_, exists := h.streams[f.streamID]
 		idle := f.streamID > h.lastStream
@@ -369,6 +409,9 @@ func (h *h2Conn) handleFrame(f h2Frame) error {
 	case h2PushPromise:
 		return h2ConnError{h2ProtocolError}
 	case h2Continuation:
+		// CONTINUATION frames are only valid immediately after a HEADERS frame
+		// that didn't have END_HEADERS set. They are consumed inline in
+		// handleHeaders. A standalone CONTINUATION is a protocol error.
 		return h2ConnError{h2ProtocolError}
 	default:
 		// Unknown extension frame types are explicitly ignored by HTTP/2 receivers.
@@ -384,6 +427,9 @@ func (h *h2Conn) handleSettings(f h2Frame) error {
 	if f.flags&h2FlagAck != 0 {
 		if len(f.payload) != 0 {
 			return h2ConnError{h2FrameSizeError}
+		}
+		if h.settingsTimer != nil {
+			h.settingsTimer.Stop()
 		}
 		if !h.settingsAwaitingAck.CompareAndSwap(true, false) {
 			return h2ConnError{h2ProtocolError}
@@ -411,6 +457,8 @@ func (h *h2Conn) applySettings(payload []byte) error {
 			if value > 1 {
 				return h2ConnError{h2ProtocolError}
 			}
+		case 3:
+			h.app.cfg.MaxConcurrentStreams = uint32(value)
 		case 4:
 			if value > uint32(h2MaxWindow) {
 				return h2ConnError{h2FlowControlError}
@@ -454,7 +502,12 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	if len(block) > maxH2HeaderListSize(h.app) {
 		return h2ConnError{h2CompressionError}
 	}
+	continuationCount := 0
 	for f.flags&h2FlagEndHeaders == 0 {
+		continuationCount++
+		if continuationCount > maxContinuationFrames {
+			return h2ConnError{h2EnhanceYourCalm}
+		}
 		next, readErr := h.readFrame()
 		if readErr != nil {
 			return readErr
@@ -466,7 +519,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		if len(block) > maxH2HeaderListSize(h.app) {
 			return h2ConnError{h2CompressionError}
 		}
-		f.flags = next.flags
+		f.flags |= next.flags & (h2FlagEndHeaders | h2FlagEndStream)
 	}
 	fields, err := h.dec.DecodeFull(block)
 	if err != nil {
@@ -491,7 +544,18 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			return nil
 		}
 		streamCtx, cancel := h.newStreamContext()
-		s = &h2Stream{id: f.streamID, sendWindow: h.peerInitialWindow, recvWindow: h2InitialWindow, ctx: streamCtx, cancel: cancel}
+		initialState := stateOpen
+		if f.flags&h2FlagEndStream != 0 {
+			initialState = stateHalfClosedRemote
+		}
+		s = &h2Stream{
+			id:         f.streamID,
+			sendWindow: h.peerInitialWindow,
+			recvWindow: h2InitialWindow,
+			ctx:        streamCtx,
+			cancel:     cancel,
+		}
+		s.state.Store(int32(initialState))
 		if err := validateRequestFields(s, fields); err != nil {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ProtocolError)
@@ -499,7 +563,28 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		}
 		h.streams[f.streamID] = s
 	} else {
-		if s.dispatched || s.ended || hasPseudo(fields) {
+		st := s.state.Load()
+		if st == int32(stateHalfClosedRemote) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ErrStreamClosed)
+			return nil
+		}
+		if s.dispatched || st == int32(stateClosed) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ProtocolError)
+			return nil
+		}
+		if st == int32(stateHalfClosedRemote) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ErrStreamClosed)
+			return nil
+		}
+		if hasPseudo(fields) {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ProtocolError)
+			return nil
+		}
+		if f.flags&h2FlagEndStream == 0 {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
@@ -515,6 +600,19 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	end := f.flags&h2FlagEndStream != 0
 	if end {
 		s.ended = true
+		for {
+			st := s.state.Load()
+			next := st
+			switch st {
+			case int32(stateOpen):
+				next = int32(stateHalfClosedRemote)
+			case int32(stateHalfClosedLocal):
+				next = int32(stateClosed)
+			}
+			if s.state.CompareAndSwap(st, next) {
+				break
+			}
+		}
 	}
 	h.mu.Unlock()
 	if end && !validH2ContentLength(s) {
@@ -570,12 +668,13 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		if idle {
 			return h2ConnError{h2ProtocolError}
 		}
-		h.sendRST(f.streamID, h2StreamClosed)
+		h.sendRST(f.streamID, h2ErrStreamClosed)
 		return nil
 	}
-	if s.ended {
+	st := s.state.Load()
+	if st != int32(stateOpen) && st != int32(stateHalfClosedLocal) {
 		h.mu.Unlock()
-		h.sendRST(f.streamID, h2StreamClosed)
+		h.sendRST(f.streamID, h2ErrStreamClosed)
 		return nil
 	}
 	if len(s.body)+len(p) > maxH2RequestBodySize(h.app) {
@@ -589,15 +688,48 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		h.mu.Unlock()
 		return h2ConnError{h2FlowControlError}
 	}
-	s.recvWindow += int64(len(f.payload))
+	// Batched flow control: accumulate consumed bytes and send WINDOW_UPDATE
+	// at threshold to avoid per-frame updates (RFC 9113 §6.9.1).
+	var connWU, streamWU uint32
+	if len(f.payload) > 0 {
+		h.connRecvWindow += int64(len(f.payload))
+		s.recvWindowAccum += int64(len(f.payload))
+		if h.connRecvWindow >= windowsUpdateThreshold {
+			connWU = uint32(h.connRecvWindow)
+			h.connRecvWindow = 0
+		}
+		if s.recvWindowAccum >= windowsUpdateThreshold {
+			streamWU = uint32(s.recvWindowAccum)
+			s.recvWindow += s.recvWindowAccum
+			s.recvWindowAccum = 0
+		}
+	}
 	end := f.flags&h2FlagEndStream != 0
 	if end {
 		s.ended = true
+		for {
+			st := s.state.Load()
+			var next int32
+			switch st {
+			case int32(stateOpen):
+				next = int32(stateHalfClosedRemote)
+			case int32(stateHalfClosedLocal):
+				next = int32(stateClosed)
+			default:
+				next = st
+			}
+			if s.state.CompareAndSwap(st, next) {
+				break
+			}
+		}
 	}
 	h.mu.Unlock()
-	if len(f.payload) > 0 {
-		_ = h.sendWindowUpdate(0, uint32(len(f.payload)))
-		_ = h.sendWindowUpdate(f.streamID, uint32(len(f.payload)))
+	// Send batched WINDOW_UPDATE outside the lock
+	if connWU > 0 {
+		_ = h.sendWindowUpdate(0, connWU)
+	}
+	if streamWU > 0 {
+		_ = h.sendWindowUpdate(f.streamID, streamWU)
 	}
 	if end && !validH2ContentLength(s) {
 		h.sendRST(f.streamID, h2ProtocolError)
@@ -617,13 +749,15 @@ func (h *h2Conn) handleWindowUpdate(f h2Frame) error {
 	if inc == 0 {
 		return h2ConnError{h2ProtocolError}
 	}
-	h.flowMu.Lock()
-	defer h.flowMu.Unlock()
 	if f.streamID == 0 {
+		h.flowMu.Lock()
 		if h.connSendWindow+inc > h2MaxWindow {
+			h.flowMu.Unlock()
 			return h2ConnError{h2FlowControlError}
 		}
 		h.connSendWindow += inc
+		h.flowCond.Broadcast()
+		h.flowMu.Unlock()
 	} else {
 		h.mu.Lock()
 		s := h.streams[f.streamID]
@@ -635,13 +769,17 @@ func (h *h2Conn) handleWindowUpdate(f h2Frame) error {
 		if s != nil {
 			if s.sendWindow+inc > h2MaxWindow {
 				h.mu.Unlock()
-				return h2ConnError{h2FlowControlError}
+				// RFC 7540 §6.9.1: stream-level overflow is a stream error
+				h.sendRST(f.streamID, h2FlowControlError)
+				return nil
 			}
 			s.sendWindow += inc
 		}
 		h.mu.Unlock()
+		h.flowMu.Lock()
+		h.flowCond.Broadcast()
+		h.flowMu.Unlock()
 	}
-	h.flowCond.Broadcast()
 	return nil
 }
 
@@ -989,7 +1127,10 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *Ctx, contentLength *int, en
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 	h.encBuf.Reset()
-	fields := []hpack.HeaderField{{Name: ":status", Value: strconv.Itoa(c.status)}}
+	fields := []hpack.HeaderField{
+		{Name: ":status", Value: strconv.Itoa(c.status)},
+		{Name: "date", Value: cachedDateValue()},
+	}
 	if c.contentType != nil {
 		fields = append(fields, hpack.HeaderField{Name: "content-type", Value: string(c.contentType)})
 	}
@@ -1025,6 +1166,7 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *Ctx, contentLength *int, en
 	flags := h2FlagEndHeaders
 	if end {
 		flags |= h2FlagEndStream
+		h.endLocalStream(s)
 	}
 	return h.writeHeaderBlockLocked(s.id, flags, block)
 }
@@ -1064,11 +1206,13 @@ func (h *h2Conn) sendTrailers(s *h2Stream, trailers []Header) error {
 		}
 	}
 	block := h.encBuf.Bytes()
+	h.endLocalStream(s)
 	return h.writeHeaderBlockLocked(s.id, h2FlagEndStream|h2FlagEndHeaders, block)
 }
 
 func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 	if len(data) == 0 && end {
+		h.endLocalStream(s)
 		return h.writeFrame(h2Data, h2FlagEndStream, s.id, nil)
 	}
 	for len(data) > 0 {
@@ -1113,13 +1257,14 @@ func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 			h.flowMu.Unlock()
 			continue
 		}
-		h.connSendWindow -= n
+			h.connSendWindow -= n
 		s.sendWindow -= n
 		h.flowMu.Unlock()
 
 		flags := uint8(0)
 		if int(n) == len(data) && end {
 			flags = h2FlagEndStream
+			h.endLocalStream(s)
 		}
 		if err := h.writeFrame(h2Data, flags, s.id, data[:int(n)]); err != nil {
 			return err
@@ -1129,15 +1274,42 @@ func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 	return nil
 }
 
+func (h *h2Conn) endLocalStream(s *h2Stream) {
+	for {
+		st := s.state.Load()
+		var next int32
+		switch st {
+		case int32(stateOpen):
+			next = int32(stateHalfClosedLocal)
+		case int32(stateHalfClosedRemote):
+			next = int32(stateClosed)
+		default:
+			return
+		}
+		if s.state.CompareAndSwap(st, next) {
+			break
+		}
+	}
+}
+
 func (h *h2Conn) sendSettings() error {
 	h.settingsAwaitingAck.Store(true)
-	var p [18]byte
+	var p [30]byte
+	// SETTINGS_ENABLE_PUSH (0)
 	binary.BigEndian.PutUint16(p[0:2], 2)
 	binary.BigEndian.PutUint32(p[2:6], 0)
+	// SETTINGS_MAX_CONCURRENT_STREAMS (3)
 	binary.BigEndian.PutUint16(p[6:8], 3)
 	binary.BigEndian.PutUint32(p[8:12], maxH2ConcurrentStreams(h.app))
-	binary.BigEndian.PutUint16(p[12:14], 6)
-	binary.BigEndian.PutUint32(p[14:18], uint32(maxH2HeaderListSize(h.app)))
+	// SETTINGS_INITIAL_WINDOW_SIZE (4)
+	binary.BigEndian.PutUint16(p[12:14], 4)
+	binary.BigEndian.PutUint32(p[14:18], uint32(h2InitialWindow))
+	// SETTINGS_MAX_FRAME_SIZE (5)
+	binary.BigEndian.PutUint16(p[18:20], 5)
+	binary.BigEndian.PutUint32(p[20:24], h2DefaultFrame)
+	// SETTINGS_MAX_HEADER_LIST_SIZE (6)
+	binary.BigEndian.PutUint16(p[24:26], 6)
+	binary.BigEndian.PutUint32(p[26:30], uint32(maxH2HeaderListSize(h.app)))
 	return h.writeFrame(h2Settings, 0, 0, p[:])
 }
 
@@ -1178,11 +1350,21 @@ func (h *h2Conn) sendWindowUpdate(streamID, increment uint32) error {
 	return h.writeFrame(h2WindowUpdate, 0, streamID, p[:])
 }
 func (h *h2Conn) sendRST(streamID, code uint32) {
+	h.resetStream(streamID)
 	var p [4]byte
 	binary.BigEndian.PutUint32(p[:], code)
 	_ = h.writeFrame(h2RSTStream, 0, streamID, p[:])
-	h.resetStream(streamID)
 }
+func (h *h2Conn) allowRST() bool {
+	now := time.Now()
+	if now.Sub(h.resetWindowStart) > time.Minute {
+		h.resetCount = 0
+		h.resetWindowStart = now
+	}
+	h.resetCount++
+	return h.resetCount <= maxRSTStreamPerMinute
+}
+
 func (h *h2Conn) resetStream(id uint32) {
 	h.mu.Lock()
 	s := h.streams[id]

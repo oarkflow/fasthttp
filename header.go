@@ -76,6 +76,9 @@ const (
 // ErrMalformedRequest is returned when the request cannot be parsed.
 var ErrMalformedRequest = errors.New("malformed HTTP request")
 
+// ErrRequestLineTooLarge is returned when the request line exceeds the limit.
+var ErrRequestLineTooLarge = errors.New("request line too large")
+
 // Header is a single HTTP header key/value.
 // Both slices point into the read buffer — zero copy.
 type Header struct {
@@ -189,22 +192,34 @@ func strBytesEqualFold(a string, b []byte) bool {
 
 // parseRequestLine parses "METHOD URI HTTP/1.x\r\n".
 // Returns bytes consumed or error.
-func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
-	i := bytes.IndexByte(buf, ' ')
+func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error) {
+	// Find end of request line
+	lineEnd := bytes.Index(buf, strCRLF)
+	if lineEnd < 0 {
+		if len(buf) > maxLineSize {
+			return 0, ErrRequestLineTooLarge
+		}
+		return 0, ErrMalformedRequest
+	}
+	if lineEnd > maxLineSize {
+		return 0, ErrRequestLineTooLarge
+	}
+	line := buf[:lineEnd]
+	i := bytes.IndexByte(line, ' ')
 	if i < 0 {
 		return 0, ErrMalformedRequest
 	}
-	h.Method = buf[:i]
+	h.Method = line[:i]
 	if len(h.Method) == 0 || !validToken(h.Method) {
 		return 0, ErrMalformedRequest
 	}
-	buf = buf[i+1:]
+	line = line[i+1:]
 
-	j := bytes.IndexByte(buf, ' ')
+	j := bytes.IndexByte(line, ' ')
 	if j < 0 {
 		return 0, ErrMalformedRequest
 	}
-	h.URI = buf[:j]
+	h.URI = line[:j]
 	for _, c := range h.URI {
 		if c <= 0x20 || c == 0x7f || c == '#' {
 			return 0, ErrMalformedRequest
@@ -218,20 +233,32 @@ func parseRequestLine(buf []byte, h *RequestHeader) (int, error) {
 		validTarget = true
 	}
 	if !validTarget {
+		// RFC 9112 §3.2.2: absolute-form (e.g., GET http://example.com/path HTTP/1.1)
+		if absIdx := bytes.Index(h.URI, []byte("://")); absIdx > 0 {
+			scheme := h.URI[:absIdx]
+			ok := len(scheme) > 0
+			for _, c := range scheme {
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
+					ok = false
+					break
+				}
+			}
+			if ok && absIdx+3 < len(h.URI) {
+				validTarget = true
+			}
+		}
+	}
+	if !validTarget {
 		return 0, ErrMalformedRequest
 	}
-	buf = buf[j+1:]
+	line = line[j+1:]
 
-	k := bytes.Index(buf, strCRLF)
-	if k < 0 {
-		return 0, ErrMalformedRequest
-	}
-	h.Proto = buf[:k]
+	h.Proto = line
 	if !bytes.Equal(h.Proto, strHTTP11) && !bytes.Equal(h.Proto, strHTTP10) {
-		return 0, ErrMalformedRequest
+		return 0, NewHTTPError(505, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
 	}
 	h.KeepAlive = bytes.Equal(h.Proto, strHTTP11)
-	return i + 1 + j + 1 + k + 2, nil
+	return lineEnd + 2, nil
 }
 
 // parseHeaders parses all headers until the blank line.
@@ -245,6 +272,10 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 	pos := 0
 	for {
 		if pos >= len(src) {
+			return 0, ErrMalformedRequest
+		}
+		// RFC 9112 §5.5: reject obsolete line folding
+		if src[pos] == ' ' || src[pos] == '\t' {
 			return 0, ErrMalformedRequest
 		}
 		// blank line = end of headers

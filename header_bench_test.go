@@ -13,7 +13,7 @@ func BenchmarkParseRequestLine(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h.reset()
-		parseRequestLine(line, &h)
+		parseRequestLine(line, &h, 8192)
 	}
 }
 
@@ -24,7 +24,7 @@ func BenchmarkParseRequestLineOptions(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h.reset()
-		parseRequestLine(line, &h)
+		parseRequestLine(line, &h, 8192)
 	}
 }
 

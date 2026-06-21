@@ -10,7 +10,54 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"sync/atomic"
 )
+
+var (
+	dateBuf          atomic.Value
+	dateCacheUnix    int64
+	dateMu           sync.Mutex
+	dateValueBuf     atomic.Value
+	dateValueCacheUnix int64
+	dateValueMu      sync.Mutex
+)
+
+// cachedDate returns the full "Date: ...\r\n" header line.
+func cachedDate() []byte {
+	now := time.Now().Unix()
+	if now != atomic.LoadInt64(&dateCacheUnix) {
+		dateMu.Lock()
+		if now != dateCacheUnix {
+			b := make([]byte, 0, 64)
+			b = append(b, "Date: "...)
+			b = time.Now().AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
+			b = append(b, '\r', '\n')
+			dateBuf.Store(b)
+			dateCacheUnix = now
+		}
+		dateMu.Unlock()
+	}
+	b, _ := dateBuf.Load().([]byte)
+	return b
+}
+
+// cachedDateValue returns just the RFC 1123 date string (no "Date: " prefix),
+// cached and second-granular like cachedDate. Used for HTTP/2 responses.
+func cachedDateValue() string {
+	now := time.Now().Unix()
+	if now != atomic.LoadInt64(&dateValueCacheUnix) {
+		dateValueMu.Lock()
+		if now != dateValueCacheUnix {
+			b := make([]byte, 0, 56)
+			b = time.Now().AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
+			dateValueBuf.Store(b)
+			dateValueCacheUnix = now
+		}
+		dateValueMu.Unlock()
+	}
+	b, _ := dateValueBuf.Load().([]byte)
+	return string(b)
+}
 
 type Ctx struct {
 	conn   net.Conn
@@ -652,6 +699,9 @@ func (c *Ctx) writeResponseString(s string) error {
 	// Status line
 	buf = appendStatusLine(buf, c.status)
 
+	// Date (RFC 9110 §8.6)
+	buf = append(buf, cachedDate()...)
+
 	// Content-Type
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
@@ -677,7 +727,20 @@ func (c *Ctx) writeResponseString(s string) error {
 	}
 
 	bodyAllowed := responseBodyAllowed(c.status)
-	if bodyAllowed {
+	hasTrailers := len(c.responseTrailers) > 0
+
+	if bodyAllowed && hasTrailers {
+		// RFC 9112: trailers require chunked transfer encoding
+		buf = append(buf, "Transfer-Encoding: chunked\r\n"...)
+		buf = append(buf, "Trailer: "...)
+		for i, t := range c.responseTrailers {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, t.Key...)
+		}
+		buf = append(buf, '\r', '\n')
+	} else if bodyAllowed {
 		buf = append(buf, "Content-Length: "...)
 		buf = appendInt(buf, len(s))
 		buf = append(buf, '\r', '\n')
@@ -692,9 +755,28 @@ func (c *Ctx) writeResponseString(s string) error {
 
 	buf = append(buf, '\r', '\n')
 
-	// Body — append string directly, no []byte conversion
+	// Body
 	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
-		buf = append(buf, s...)
+		if hasTrailers {
+			// Write body as a single chunk
+			if len(s) > 0 {
+				buf = appendHex(buf, len(s))
+				buf = append(buf, '\r', '\n')
+				buf = append(buf, s...)
+				buf = append(buf, '\r', '\n')
+			}
+			// End chunk with trailers
+			buf = append(buf, "0\r\n"...)
+			for _, t := range c.responseTrailers {
+				buf = append(buf, t.Key...)
+				buf = append(buf, ':', ' ')
+				buf = append(buf, t.Value...)
+				buf = append(buf, '\r', '\n')
+			}
+			buf = append(buf, '\r', '\n')
+		} else {
+			buf = append(buf, s...)
+		}
 	}
 
 	c.responseTime = time.Now()
@@ -728,6 +810,9 @@ func (c *Ctx) writeResponse(body []byte) error {
 
 	buf = appendStatusLine(buf, c.status)
 
+	// Date (RFC 9110 §8.6)
+	buf = append(buf, cachedDate()...)
+
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
 		buf = append(buf, c.contentType...)
@@ -751,12 +836,26 @@ func (c *Ctx) writeResponse(body []byte) error {
 	}
 
 	bodyAllowed := responseBodyAllowed(c.status)
-	if bodyAllowed {
+	hasTrailers := len(c.responseTrailers) > 0
+
+	if bodyAllowed && hasTrailers {
+		// RFC 9112: trailers require chunked transfer encoding
+		buf = append(buf, "Transfer-Encoding: chunked\r\n"...)
+		buf = append(buf, "Trailer: "...)
+		for i, t := range c.responseTrailers {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, t.Key...)
+		}
+		buf = append(buf, '\r', '\n')
+	} else if bodyAllowed {
 		buf = append(buf, "Content-Length: "...)
 		buf = appendInt(buf, len(body))
 		buf = append(buf, '\r', '\n')
 	}
 
+	// Connection
 	if c.Header.KeepAlive && !c.forceClose {
 		buf = append(buf, "Connection: keep-alive\r\n"...)
 	} else {
@@ -766,8 +865,25 @@ func (c *Ctx) writeResponse(body []byte) error {
 	buf = append(buf, '\r', '\n')
 
 	// RFC 9110: a HEAD response has the same headers as GET but no content.
-	if bodyAllowed && len(body) > 0 && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
-		buf = append(buf, body...)
+	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
+		if hasTrailers {
+			if len(body) > 0 {
+				buf = appendHex(buf, len(body))
+				buf = append(buf, '\r', '\n')
+				buf = append(buf, body...)
+				buf = append(buf, '\r', '\n')
+			}
+			buf = append(buf, "0\r\n"...)
+			for _, t := range c.responseTrailers {
+				buf = append(buf, t.Key...)
+				buf = append(buf, ':', ' ')
+				buf = append(buf, t.Value...)
+				buf = append(buf, '\r', '\n')
+			}
+			buf = append(buf, '\r', '\n')
+		} else {
+			buf = append(buf, body...)
+		}
 	}
 
 	c.responseTime = time.Now()

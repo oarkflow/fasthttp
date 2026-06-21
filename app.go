@@ -57,6 +57,7 @@ type Config struct {
 	ReadBufferSize       int
 	MaxRequestBodySize   int
 	MaxHeaderListSize    int
+	MaxRequestLineSize   int
 	MaxConcurrentStreams uint32
 	DisableKeepAlive     bool
 	DisableHTTP2         bool
@@ -77,6 +78,7 @@ var defaultConfig = Config{
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
+	MaxRequestLineSize:   8 << 10,
 	MaxConcurrentStreams: 128,
 }
 
@@ -137,6 +139,9 @@ func New(config ...Config) *App {
 		}
 		if c.MaxHeaderListSize > 0 {
 			cfg.MaxHeaderListSize = c.MaxHeaderListSize
+		}
+		if c.MaxRequestLineSize > 0 {
+			cfg.MaxRequestLineSize = c.MaxRequestLineSize
 		}
 		if c.MaxConcurrentStreams > 0 {
 			cfg.MaxConcurrentStreams = c.MaxConcurrentStreams
@@ -568,6 +573,11 @@ func (a *App) serveConn(conn net.Conn) {
 		}
 		_ = tc.SetDeadline(time.Time{})
 		if tc.ConnectionState().NegotiatedProtocol == "h2" {
+			// RFC 9113 §9.1: TLS 1.2 or higher required for HTTP/2
+			if tc.ConnectionState().Version < tls.VersionTLS12 {
+				a.emitError(errors.New("http2: TLS version 1.2 or higher required"))
+				return
+			}
 			h2c := newH2Conn(a, conn)
 			a.setH2Conn(conn, h2c)
 			h2c.serve(nil, false)
@@ -602,7 +612,9 @@ func (a *App) serveConn(conn net.Conn) {
 				accumulated = buf[:len(accumulated)+n]
 			}
 			if err != nil {
-				if err != io.EOF && !isExpectedConnErr(err) {
+				if isTimeoutErr(err) && !a.closed.Load() {
+					_ = writeAll(conn, serverError408)
+				} else if err != io.EOF && !isExpectedConnErr(err) {
 					a.emitError(err)
 				}
 				return
@@ -632,17 +644,26 @@ func (a *App) serveConn(conn net.Conn) {
 		// ── Parse request head ────────────────────────────────────────
 		ctx := acquireCtx(conn, a)
 
-		consumed, err := parseRequestLine(accumulated, &ctx.Header)
+		consumed, err := parseRequestLine(accumulated, &ctx.Header, a.cfg.MaxRequestLineSize)
 		if err != nil {
 			releaseCtx(ctx)
-			conn.Write(serverError400)
+			if errors.Is(err, ErrRequestLineTooLarge) {
+				_ = writeAll(conn, serverError431)
+			} else {
+				var httpErr *HTTPError
+				if errors.As(err, &httpErr) && httpErr.Status == 505 {
+					_ = writeAll(conn, serverError505)
+				} else {
+					_ = writeAll(conn, serverError400)
+				}
+			}
 			return
 		}
 
 		_, err = parseHeaders(accumulated[consumed:headEnd+4], &ctx.Header)
 		if err != nil {
 			releaseCtx(ctx)
-			conn.Write(serverError400)
+			_ = writeAll(conn, serverError400)
 			return
 		}
 		if ctx.Header.UnsupportedTransferEncoding {
@@ -953,8 +974,12 @@ func readH2CUpgradeBody(conn net.Conn, ctx *Ctx, buffered []byte, bodyStart, max
 }
 
 func isExpectedConnErr(err error) bool {
+	return errors.Is(err, net.ErrClosed)
+}
+
+func isTimeoutErr(err error) bool {
 	var ne net.Error
-	return errors.As(err, &ne) && ne.Timeout() || errors.Is(err, net.ErrClosed)
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func defaultErrorHandler(ctx *Ctx, err error) {
@@ -997,8 +1022,11 @@ func (a *App) ErrorCount(code string) uint64 {
 
 // Pre-allocated 400 error response
 var serverError400 = []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError408 = []byte("HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError413 = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError417 = []byte("HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError431 = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError501 = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var plainTextCT = []byte("text/plain; charset=utf-8")

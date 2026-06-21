@@ -105,6 +105,7 @@ func huffmanDecode(dst []byte, maxLen int, src []byte) ([]byte, error) {
 	// used to distinguish EOS padding from a real symbol in the tail.
 	var cur uint
 	var cbits, sbits uint8
+	var totalCodeBits int
 
 	for _, b := range src {
 		cur = cur<<8 | uint(b)
@@ -118,25 +119,22 @@ func huffmanDecode(dst []byte, maxLen int, src []byte) ([]byte, error) {
 				return dst, ErrInvalidHuffman
 			}
 			if child.children == nil {
-				// Leaf: emit symbol and reset to root.
 				if maxLen != 0 && len(dst) == maxLen {
 					return dst, ErrStringLength
 				}
 				dst = append(dst, child.sym)
 				cbits -= child.codeLen
+				totalCodeBits += int(child.codeLen)
 				n = root
 				sbits = cbits
 			} else {
-				// Internal node: consume 8 bits and descend.
 				cbits -= 8
+				totalCodeBits += 8
 				n = child
 			}
 		}
 	}
 
-	// Tail loop: handle remaining 1–7 bits.
-	// These may contain a final symbol followed by EOS padding bits,
-	// or just padding bits (all-1s prefix of the EOS code).
 	for cbits > 0 {
 		idx := byte(cur << (8 - cbits))
 		child := n.children[idx]
@@ -144,36 +142,36 @@ func huffmanDecode(dst []byte, maxLen int, src []byte) ([]byte, error) {
 			return dst, ErrInvalidHuffman
 		}
 		if child.children == nil {
-			// Leaf found. If it requires more bits than we accumulated since
-			// the last symbol (sbits), these are padding bits — not a symbol.
 			if sbits < child.codeLen {
-				break // treat as EOS padding
+				break
 			}
 			if maxLen != 0 && len(dst) == maxLen {
 				return dst, ErrStringLength
 			}
 			dst = append(dst, child.sym)
 			cbits -= child.codeLen
+			totalCodeBits += int(child.codeLen)
 			n = root
 			sbits = cbits
 		} else {
-			// Internal node: remaining bits are an EOS padding prefix; stop.
 			break
 		}
 	}
 
-	// RFC 7541 §5.2: padding must be < 8 bits and all-1s (EOS prefix).
-	if cbits > 7 {
+	// RFC 7541 §5.2: padding longer than 7 bits is invalid.
+	totalInputBits := len(src) * 8
+	if padding := totalInputBits - totalCodeBits; padding > 7 || padding < 0 {
 		return dst, ErrInvalidHuffman
 	}
-	// sbits < cbits means we advanced through internal nodes but the pad
-	// bits represent more positions than the code has bits — invalid.
+
+	if n != root {
+		return dst, ErrInvalidHuffman
+	}
+
 	if sbits < cbits {
 		return dst, ErrInvalidHuffman
 	}
-	// Verify that all remaining cbits are 1s.
 	if cbits > 0 {
-		// Shift the cbits valid bits to the MSB position and mask.
 		padBits := byte(cur << (8 - cbits))
 		allOnes := byte(0xFF << (8 - cbits))
 		if padBits&allOnes != allOnes {

@@ -74,6 +74,7 @@ func (c *Ctx) beginStream() (*StreamWriter, error) {
 	}
 	buf := (*c.writeBuf)[:0]
 	buf = appendStatusLine(buf, c.status)
+	buf = append(buf, cachedDate()...)
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
 		buf = append(buf, c.contentType...)
