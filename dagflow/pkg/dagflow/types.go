@@ -91,6 +91,8 @@ type Workflow struct {
 	FanIn           map[string][]*Edge
 	Hash            string
 	Metadata        map[string]any
+	InputData       DataSpec
+	OutputData      DataSpec
 	MigrationPolicy WorkflowMigrationPolicy
 }
 
@@ -122,6 +124,8 @@ type Node struct {
 	InputSchema     string
 	OutputSchema    string
 	FailurePolicy   FailurePolicy
+	InputData       DataSpec
+	OutputData      DataSpec
 }
 
 type Edge struct {
@@ -141,6 +145,7 @@ type Edge struct {
 	Quorum         int
 	CancelLosers   bool
 	Map            map[string]string
+	Data           DataSpec
 }
 
 type RetryPolicy struct {
@@ -228,6 +233,7 @@ type ExecutionContext struct {
 	LastResult   any            `json:"last_result,omitempty"`
 	NodeResults  map[string]any `json:"node_results,omitempty"`
 	PreviousNode string         `json:"previous_node,omitempty"`
+	DataContext  map[string]any `json:"data_context,omitempty"`
 }
 
 type RunItem struct {

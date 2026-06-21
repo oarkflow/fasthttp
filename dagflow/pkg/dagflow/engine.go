@@ -18,6 +18,7 @@ type Engine struct {
 	snapshots      map[string][]WorkflowSnapshot
 	handlers       map[string]Handler
 	scriptHandlers map[string]string
+	dataSources    map[string]DataSourceFunc
 	metrics        *MetricsRegistry
 	runtime        *ScriptRuntime
 	store          TaskStore
@@ -37,7 +38,7 @@ func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
 	if broker == nil {
 		broker = NewMemoryBroker()
 	}
-	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker}
+	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, dataSources: map[string]DataSourceFunc{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker}
 	e.local = NewLocalQueue(e, 8)
 	e.runtime = NewScriptRuntime(e)
 	return e
@@ -181,6 +182,10 @@ func (e *Engine) RunSync(ctx context.Context, workflowID string, input any) (*Ta
 	if err != nil {
 		return nil, err
 	}
+	input, err = e.applyWorkflowInput(ctx, wf, input)
+	if err != nil {
+		return nil, err
+	}
 	task := newTask(workflowID, input)
 	task.WorkflowVersion = wf.Version
 	task.DefinitionHash = wf.Hash
@@ -190,11 +195,18 @@ func (e *Engine) RunSync(ctx context.Context, workflowID string, input any) (*Ta
 		return nil, err
 	}
 	err = e.executeTask(ctx, wf, task, []RunItem{{NodeID: wf.First, Input: input}})
+	if err == nil && task.Status != TaskWaiting && task.Status != TaskPaused && task.Status != TaskCancelled {
+		task.Result, err = e.applyWorkflowOutput(ctx, wf, task, task.Result)
+	}
 	e.finishTask(task, err)
 	return task, err
 }
 func (e *Engine) RunAsync(ctx context.Context, workflowID string, input any) (*Task, error) {
 	wf, err := e.workflow(workflowID)
+	if err != nil {
+		return nil, err
+	}
+	input, err = e.applyWorkflowInput(ctx, wf, input)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +220,9 @@ func (e *Engine) RunAsync(ctx context.Context, workflowID string, input any) (*T
 	}
 	go func() {
 		err := e.executeTask(context.Background(), wf, task, []RunItem{{NodeID: wf.First, Input: input}})
+		if err == nil && task.Status != TaskWaiting && task.Status != TaskPaused && task.Status != TaskCancelled {
+			task.Result, err = e.applyWorkflowOutput(context.Background(), wf, task, task.Result)
+		}
 		e.finishTask(task, err)
 	}()
 	return task, nil
@@ -298,7 +313,14 @@ func (e *Engine) RunStandaloneNode(ctx context.Context, workflowID, nodeID strin
 	}
 	task := newTask(workflowID, input)
 	task.ID = newID("standalone")
+	input, err = e.applyNodeInput(ctx, wf, task, node, input)
+	if err != nil {
+		return nil, nil, err
+	}
 	res, err := e.runNode(ctx, wf, task, node, input, node.ID)
+	if err == nil {
+		res, err = e.applyNodeOutput(ctx, wf, task, node, res)
+	}
 	return task.NodeStates[node.ID], res, err
 }
 
@@ -350,15 +372,23 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 				continue
 			}
 		}
-		result, err := e.runNode(ctx, wf, task, node, item.Input, node.ID)
+		nodeInput, derr := e.applyNodeInput(ctx, wf, task, node, item.Input)
+		if derr != nil {
+			if errors.Is(derr, ErrDataFiltered) {
+				e.markSkipped(task, node, item.Input)
+				continue
+			}
+			return fmt.Errorf("node %s input data: %w", node.ID, derr)
+		}
+		result, err := e.runNode(ctx, wf, task, node, nodeInput, node.ID)
 		if err != nil {
-			e.recordNodeError(task, node, item.Input, err)
+			e.recordNodeError(task, node, nodeInput, err)
 			if st := task.NodeStates[node.ID]; st != nil {
-				e.storeDLQ(task, node, item.Input, err, st.Attempts)
+				e.storeDLQ(task, node, nodeInput, err, st.Attempts)
 			}
 			if node.ContinueOnError {
 				e.audit(task, "node.error.continued", "continuing after node error", map[string]any{"node": node.ID, "error": err.Error()})
-				next, rerr := e.resolveEdges(ctx, wf, task, node, map[string]any{"error": err.Error(), "input": item.Input}, true)
+				next, rerr := e.resolveEdges(ctx, wf, task, node, map[string]any{"error": err.Error(), "input": nodeInput}, true)
 				if rerr != nil {
 					return rerr
 				}
@@ -367,9 +397,20 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 			}
 			task.Cursor = queue
 			task.FailedNodeID = node.ID
-			task.FailedInput = item.Input
+			task.FailedInput = nodeInput
 			_ = e.store.Save(task)
 			return fmt.Errorf("node %s failed: %w", node.ID, err)
+		}
+		result, err = e.applyNodeOutput(ctx, wf, task, node, result)
+		if err != nil {
+			if errors.Is(err, ErrDataFiltered) {
+				e.markSkipped(task, node, nodeInput)
+				continue
+			}
+			return fmt.Errorf("node %s output data: %w", node.ID, err)
+		}
+		if st := task.NodeStates[node.ID]; st != nil {
+			st.Result = result
 		}
 		task.PreviousNode = node.ID
 		task.PreviousNodes = append(task.PreviousNodes, node.ID)
@@ -560,7 +601,7 @@ func (e *Engine) executeHandler(ctx context.Context, wf *Workflow, task *Task, n
 		if h == nil {
 			return nil, fmt.Errorf("handler %q not registered", node.Handler)
 		}
-		ec := &ExecutionContext{ContextID: newID("ctx"), TaskID: task.ID, WorkflowID: wf.ID, NodeID: node.ID, Attempt: attempt, Values: map[string]any{"task_id": task.ID, "workflow_id": wf.ID, "node_id": node.ID}, NodeParams: node.Params, TaskInput: task.Input, LastResult: task.LastResult, NodeResults: task.NodeResults, PreviousNode: task.PreviousNode}
+		ec := &ExecutionContext{ContextID: newID("ctx"), TaskID: task.ID, WorkflowID: wf.ID, NodeID: node.ID, Attempt: attempt, Values: map[string]any{"task_id": task.ID, "workflow_id": wf.ID, "node_id": node.ID}, NodeParams: node.Params, TaskInput: task.Input, LastResult: task.LastResult, NodeResults: task.NodeResults, PreviousNode: task.PreviousNode, DataContext: e.dataFacts(&DataContext{Workflow: wf, Task: task, Node: node, Input: input, Result: input})}
 		return h(ec, input)
 	default:
 		return nil, fmt.Errorf("unsupported node type %q", node.Type)
@@ -578,8 +619,15 @@ func (e *Engine) resolveEdges(ctx context.Context, wf *Workflow, task *Task, nod
 		}
 		switch edge.Type {
 		case EdgeSimple, EdgeError, EdgeFallback, EdgeTimeout, EdgeRetry, EdgeCompensate:
+			edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+			if err != nil {
+				if errors.Is(err, ErrDataFiltered) {
+					continue
+				}
+				return nil, err
+			}
 			for _, target := range edge.Targets {
-				out = append(out, RunItem{NodeID: target, Input: result, From: node.ID, EdgeID: edge.ID})
+				out = append(out, RunItem{NodeID: target, Input: edgeInput, From: node.ID, EdgeID: edge.ID})
 			}
 		case EdgeBranch:
 			ok, err := e.evalEdgeCondition(edge, task, node, result)
@@ -587,13 +635,27 @@ func (e *Engine) resolveEdges(ctx context.Context, wf *Workflow, task *Task, nod
 				return nil, fmt.Errorf("edge %s condition: %w", edge.ID, err)
 			}
 			if ok {
+				edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+				if err != nil {
+					if errors.Is(err, ErrDataFiltered) {
+						continue
+					}
+					return nil, err
+				}
 				for _, target := range edge.Targets {
-					out = append(out, RunItem{NodeID: target, Input: result, From: node.ID, EdgeID: edge.ID})
+					out = append(out, RunItem{NodeID: target, Input: edgeInput, From: node.ID, EdgeID: edge.ID})
 				}
 			}
 		case EdgeFanOut:
+			edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+			if err != nil {
+				if errors.Is(err, ErrDataFiltered) {
+					continue
+				}
+				return nil, err
+			}
 			for _, target := range edge.Targets {
-				out = append(out, RunItem{NodeID: target, Input: result, From: node.ID, EdgeID: edge.ID})
+				out = append(out, RunItem{NodeID: target, Input: edgeInput, From: node.ID, EdgeID: edge.ID})
 			}
 		case EdgeFanIn, EdgeJoin:
 			items, ready, err := e.recordFanIn(task, edge, node.ID, result)
@@ -601,22 +663,55 @@ func (e *Engine) resolveEdges(ctx context.Context, wf *Workflow, task *Task, nod
 				return nil, err
 			}
 			if ready {
-				out = append(out, items...)
+				for i := range items {
+					if !edge.Data.Empty() || len(edge.Map) > 0 {
+						transformed, derr := e.applyData(ctx, edgeDataSpec(edge), &DataContext{Workflow: wf, Task: task, Node: node, Edge: edge, Input: items[i].Input, Result: items[i].Input}, items[i].Input)
+						if derr != nil {
+							if errors.Is(derr, ErrDataFiltered) {
+								continue
+							}
+							return nil, derr
+						}
+						items[i].Input = transformed
+					}
+					out = append(out, items[i])
+				}
 			}
 		case EdgeParallel:
-			items, err := e.runParallelTargets(ctx, wf, task, edge, result)
+			edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+			if err != nil {
+				if errors.Is(err, ErrDataFiltered) {
+					continue
+				}
+				return nil, err
+			}
+			items, err := e.runParallelTargets(ctx, wf, task, edge, edgeInput)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, items...)
 		case EdgeRace:
-			items, err := e.runRaceTargets(ctx, wf, task, edge, result)
+			edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+			if err != nil {
+				if errors.Is(err, ErrDataFiltered) {
+					continue
+				}
+				return nil, err
+			}
+			items, err := e.runRaceTargets(ctx, wf, task, edge, edgeInput)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, items...)
 		case EdgeIterator:
-			items, err := toSlice(result)
+			edgeInput, err := e.applyEdgeData(ctx, wf, task, node, edge, result)
+			if err != nil {
+				if errors.Is(err, ErrDataFiltered) {
+					continue
+				}
+				return nil, err
+			}
+			items, err := toSlice(edgeInput)
 			if err != nil {
 				return nil, fmt.Errorf("edge %s iterator input: %w", edge.ID, err)
 			}
@@ -630,7 +725,20 @@ func (e *Engine) resolveEdges(ctx context.Context, wf *Workflow, task *Task, nod
 			for i, item := range items {
 				started := time.Now()
 				stateKey := fmt.Sprintf("%s[%d]", target.ID, i)
-				res, err := e.runNode(ctx, wf, task, target, item, stateKey)
+				itemInput, derr := e.applyNodeInput(ctx, wf, task, target, item)
+				if derr != nil {
+					if errors.Is(derr, ErrDataFiltered) {
+						continue
+					}
+					return nil, derr
+				}
+				res, err := e.runNode(ctx, wf, task, target, itemInput, stateKey)
+				if err == nil {
+					res, err = e.applyNodeOutput(ctx, wf, task, target, res)
+				}
+				if st := task.NodeStates[stateKey]; st != nil {
+					st.Result = res
+				}
 				iter := IterationState{Index: i, Input: item, Result: res, StartedAt: started, FinishedAt: time.Now(), Status: NodeCompleted}
 				iter.Duration = iter.FinishedAt.Sub(iter.StartedAt)
 				if err != nil {
@@ -680,6 +788,31 @@ func (e *Engine) audit(task *Task, event, message string, data map[string]any) {
 		return
 	}
 	task.Audit = append(task.Audit, AuditEvent{ID: newID("audit"), TaskID: task.ID, WorkflowID: task.WorkflowID, NodeID: task.CurrentNode, Event: event, Message: message, Data: data, At: time.Now()})
+}
+
+func (e *Engine) applyWorkflowInput(ctx context.Context, wf *Workflow, input any) (any, error) {
+	return e.applyData(ctx, wf.InputData, &DataContext{Workflow: wf, Input: input, Result: input}, input)
+}
+func (e *Engine) applyWorkflowOutput(ctx context.Context, wf *Workflow, task *Task, result any) (any, error) {
+	return e.applyData(ctx, wf.OutputData, &DataContext{Workflow: wf, Task: task, Input: result, Result: result}, result)
+}
+func (e *Engine) applyNodeInput(ctx context.Context, wf *Workflow, task *Task, node *Node, input any) (any, error) {
+	return e.applyData(ctx, node.InputData, &DataContext{Workflow: wf, Task: task, Node: node, Input: input, Result: input}, input)
+}
+func (e *Engine) applyNodeOutput(ctx context.Context, wf *Workflow, task *Task, node *Node, result any) (any, error) {
+	return e.applyData(ctx, node.OutputData, &DataContext{Workflow: wf, Task: task, Node: node, Input: result, Result: result}, result)
+}
+func edgeDataSpec(edge *Edge) DataSpec {
+	spec := edge.Data
+	if spec.Empty() && len(edge.Map) > 0 {
+		spec.Map = edge.Map
+	}
+	return spec
+}
+
+func (e *Engine) applyEdgeData(ctx context.Context, wf *Workflow, task *Task, node *Node, edge *Edge, result any) (any, error) {
+	spec := edgeDataSpec(edge)
+	return e.applyData(ctx, spec, &DataContext{Workflow: wf, Task: task, Node: node, Edge: edge, Input: result, Result: result}, result)
 }
 
 func (e *Engine) finishTask(task *Task, err error) {

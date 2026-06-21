@@ -1,17 +1,48 @@
 workflow "script_email_enrich" {
-  name "Interpreter Script Email Enrichment"
-  version "1.0.0"
+  name "Interpreter Script Email Enrichment with Data ETL"
+  version "1.1.0"
   first "enrich"
   max_visits 32
   debug true
 
-  # Do not set input_schema/output_schema here. Some generated core versions
-  # validate node schema references before schema blocks are merged into the
-  # engine. The route and workflow still work; schema validation can be
-  # re-enabled after the core loader is fixed.
+  input_data {
+    transform {
+      field "to"
+      op lower
+    }
+    transform {
+      field "subject"
+      op trim
+    }
+    defaults {
+      body ""
+    }
+  }
+
   node "enrich" {
     type script
     handler "script_enrich_email"
     last true
+
+    input_data {
+      source "input"
+      map {
+        to "to"
+        subject "subject"
+        body "body"
+      }
+      env {
+        app_env "DAGFLOW_ENV"
+      }
+      services {
+        tenant_config "tenant_config:script"
+      }
+    }
+
+    output_data {
+      set {
+        enriched_by "bcl-script"
+      }
+    }
   }
 }

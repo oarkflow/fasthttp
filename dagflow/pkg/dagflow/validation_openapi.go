@@ -17,6 +17,16 @@ func ValidateConfig(cfg *Config, e *Engine) error {
 		if r.Workflow == "" && r.Chain == "" && len(r.Workflows) == 0 {
 			return fmt.Errorf("route %s has no target", r.ID)
 		}
+		if r.InputSchema != "" {
+			if _, ok := e.Schema(r.InputSchema); !ok {
+				return fmt.Errorf("route %s references missing input schema %s", r.ID, r.InputSchema)
+			}
+		}
+		if r.OutputSchema != "" {
+			if _, ok := e.Schema(r.OutputSchema); !ok {
+				return fmt.Errorf("route %s references missing output schema %s", r.ID, r.OutputSchema)
+			}
+		}
 		if r.Workflow != "" {
 			if _, err := e.workflow(r.Workflow); err != nil {
 				return err
@@ -94,7 +104,44 @@ func GenerateOpenAPI(cfg *Config) map[string]any {
 		}
 		m[strings.ToLower(r.Method)] = map[string]any{"operationId": r.ID, "tags": r.Tags, "x-workflow": r.Workflow, "x-chain": r.Chain, "x-mode": r.Mode, "requestBody": schemaRef(r.InputSchema), "responses": map[string]any{"200": map[string]any{"description": "OK", "content": map[string]any{"application/json": map[string]any{"schema": schemaRefValue(r.OutputSchema)}}}, "202": map[string]any{"description": "Accepted"}}}
 	}
-	return map[string]any{"openapi": "3.1.0", "info": map[string]any{"title": "DAGFlow API", "version": "1.0.0"}, "paths": paths}
+	components := map[string]any{"schemas": schemasToOpenAPI(cfg.Schemas)}
+	return map[string]any{"openapi": "3.1.0", "info": map[string]any{"title": "DAGFlow API", "version": "1.0.0"}, "paths": paths, "components": components}
+}
+
+func schemasToOpenAPI(schemas []SchemaConfig) map[string]any {
+	out := map[string]any{}
+	for _, s := range schemas {
+		props := map[string]any{}
+		for _, f := range s.Fields {
+			props[f.ID] = map[string]any{"type": schemaTypeForOpenAPI(f.Type)}
+			if f.Format != "" {
+				props[f.ID].(map[string]any)["format"] = f.Format
+			}
+		}
+		typeName := s.Type
+		if typeName == "" {
+			typeName = "object"
+		}
+		out[s.ID] = map[string]any{"type": schemaTypeForOpenAPI(typeName), "required": s.Required, "properties": props}
+	}
+	return out
+}
+
+func schemaTypeForOpenAPI(t string) string {
+	switch t {
+	case "number", "integer", "boolean", "array", "object", "string":
+		return t
+	case "bool":
+		return "boolean"
+	case "int":
+		return "integer"
+	case "float", "double":
+		return "number"
+	case "":
+		return "object"
+	default:
+		return "string"
+	}
 }
 func routeToOpenAPIPath(p string) string {
 	parts := strings.Split(strings.Trim(p, "/"), "/")

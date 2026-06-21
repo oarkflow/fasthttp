@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -74,6 +75,8 @@ type WorkflowConfig struct {
 	MaxVisits       int                     `bcl:"max_visits,omitempty"`
 	Mode            RunMode                 `bcl:"mode,ident,omitempty"`
 	MigrationPolicy WorkflowMigrationPolicy `bcl:"migration_policy,ident,omitempty"`
+	InputData       DataConfig              `bcl:"input_data,block,omitempty"`
+	OutputData      DataConfig              `bcl:"output_data,block,omitempty"`
 	Nodes           []NodeConfig            `bcl:"node,block"`
 	Edges           []EdgeConfig            `bcl:"edge,block"`
 }
@@ -106,6 +109,8 @@ type NodeConfig struct {
 	InputSchema     string               `bcl:"input_schema,omitempty"`
 	OutputSchema    string               `bcl:"output_schema,omitempty"`
 	FailurePolicy   FailurePolicyConfig  `bcl:"failure_policy,block,omitempty"`
+	InputData       DataConfig           `bcl:"input_data,block,omitempty"`
+	OutputData      DataConfig           `bcl:"output_data,block,omitempty"`
 }
 
 type RetryPolicyConfig struct {
@@ -143,6 +148,38 @@ type EdgeConfig struct {
 	Quorum         int               `bcl:"quorum,omitempty"`
 	CancelLosers   bool              `bcl:"cancel_losers,omitempty"`
 	Map            map[string]string `bcl:"map,omitempty"`
+	Data           DataConfig        `bcl:"data,block,omitempty"`
+}
+
+type DataConfig struct {
+	Source       string                `bcl:"source,omitempty" json:"source,omitempty"`
+	Map          map[string]string     `bcl:"map,omitempty" json:"map,omitempty"`
+	Set          map[string]any        `bcl:"set,omitempty" json:"set,omitempty"`
+	Defaults     map[string]any        `bcl:"defaults,omitempty" json:"defaults,omitempty"`
+	Env          map[string]string     `bcl:"env,omitempty" json:"env,omitempty"`
+	Services     map[string]string     `bcl:"services,omitempty" json:"services,omitempty"`
+	Integrations map[string]string     `bcl:"integrations,omitempty" json:"integrations,omitempty"`
+	Pick         []string              `bcl:"pick,omitempty" json:"pick,omitempty"`
+	Omit         []string              `bcl:"omit,omitempty" json:"omit,omitempty"`
+	Rename       map[string]string     `bcl:"rename,omitempty" json:"rename,omitempty"`
+	Transforms   []DataTransformConfig `bcl:"transform,block" json:"transforms,omitempty"`
+	Filters      []DataFilterConfig    `bcl:"filter,block" json:"filters,omitempty"`
+	Append       map[string]string     `bcl:"append,omitempty" json:"append,omitempty"`
+	Prepend      map[string]string     `bcl:"prepend,omitempty" json:"prepend,omitempty"`
+	Flatten      []string              `bcl:"flatten,omitempty" json:"flatten,omitempty"`
+	Strict       bool                  `bcl:"strict,omitempty" json:"strict,omitempty"`
+}
+
+type DataTransformConfig struct {
+	Field string `bcl:"field,omitempty" json:"field,omitempty"`
+	Expr  string `bcl:"expr,omitempty" json:"expr,omitempty"`
+	Op    string `bcl:"op,ident,omitempty" json:"op,omitempty"`
+	Arg   string `bcl:"arg,omitempty" json:"arg,omitempty"`
+}
+
+type DataFilterConfig struct {
+	Expr string `bcl:"expr,omitempty" json:"expr,omitempty"`
+	Mode string `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
 }
 
 type ChainConfig struct {
@@ -155,20 +192,21 @@ type ChainConfig struct {
 }
 
 type RouteConfig struct {
-	ID           string    `bcl:",id" json:"id"`
-	Method       string    `bcl:"method" json:"method"`
-	Path         string    `bcl:"path" json:"path"`
-	Workflow     string    `bcl:"workflow,omitempty" json:"workflow,omitempty"`
-	Chain        string    `bcl:"chain,omitempty" json:"chain,omitempty"`
-	Workflows    []string  `bcl:"workflows,omitempty" json:"workflows,omitempty"`
-	Mode         RouteMode `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
-	Middlewares  []string  `bcl:"middlewares,omitempty" json:"middlewares,omitempty"`
-	Envelope     bool      `bcl:"envelope,omitempty" json:"envelope,omitempty"`
-	When         string    `bcl:"when,omitempty" json:"when,omitempty"`
-	Condition    string    `bcl:"condition,omitempty" json:"condition,omitempty"`
-	InputSchema  string    `bcl:"input_schema,omitempty" json:"input_schema,omitempty"`
-	OutputSchema string    `bcl:"output_schema,omitempty" json:"output_schema,omitempty"`
-	Tags         []string  `bcl:"tags,omitempty" json:"tags,omitempty"`
+	ID           string     `bcl:",id" json:"id"`
+	Method       string     `bcl:"method" json:"method"`
+	Path         string     `bcl:"path" json:"path"`
+	Workflow     string     `bcl:"workflow,omitempty" json:"workflow,omitempty"`
+	Chain        string     `bcl:"chain,omitempty" json:"chain,omitempty"`
+	Workflows    []string   `bcl:"workflows,omitempty" json:"workflows,omitempty"`
+	Mode         RouteMode  `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
+	Middlewares  []string   `bcl:"middlewares,omitempty" json:"middlewares,omitempty"`
+	Envelope     bool       `bcl:"envelope,omitempty" json:"envelope,omitempty"`
+	When         string     `bcl:"when,omitempty" json:"when,omitempty"`
+	Condition    string     `bcl:"condition,omitempty" json:"condition,omitempty"`
+	InputSchema  string     `bcl:"input_schema,omitempty" json:"input_schema,omitempty"`
+	OutputSchema string     `bcl:"output_schema,omitempty" json:"output_schema,omitempty"`
+	Tags         []string   `bcl:"tags,omitempty" json:"tags,omitempty"`
+	Data         DataConfig `bcl:"data,block,omitempty" json:"data,omitempty"`
 }
 
 type FailurePolicyConfig struct {
@@ -216,7 +254,12 @@ func LoadBCL(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeBCL(data)
+	cfg, err := decodeBCL(data)
+	if err != nil {
+		return nil, err
+	}
+	supplementConfigFromBCL(path, data, cfg)
+	return cfg, nil
 }
 
 func LoadBCLDir(dir string) (*Config, error) {
@@ -257,6 +300,7 @@ func LoadBCLDir(dir string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode %s: %w", f, err)
 		}
+		supplementConfigFromBCL(f, data, frag)
 		mergeConfig(merged, frag)
 	}
 	return merged, nil
@@ -288,6 +332,165 @@ func decodeBCL(data []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+func supplementConfigFromBCL(filename string, data []byte, cfg *Config) {
+	if cfg == nil || len(data) == 0 {
+		return
+	}
+	for _, sc := range parseSchemaBlocks(data) {
+		merged := false
+		for i := range cfg.Schemas {
+			if cfg.Schemas[i].ID == sc.ID {
+				if cfg.Schemas[i].Type == "" {
+					cfg.Schemas[i].Type = sc.Type
+				}
+				if len(cfg.Schemas[i].Required) == 0 {
+					cfg.Schemas[i].Required = sc.Required
+				}
+				if len(cfg.Schemas[i].Fields) == 0 {
+					cfg.Schemas[i].Fields = sc.Fields
+				}
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			cfg.Schemas = append(cfg.Schemas, sc)
+		}
+	}
+}
+
+func parseSchemaBlocks(data []byte) []SchemaConfig {
+	text := string(data)
+	blocks := extractNamedBlocks(text, "schema")
+	out := make([]SchemaConfig, 0, len(blocks))
+	for _, b := range blocks {
+		sc := SchemaConfig{ID: b.name}
+		if m := identLineRE("type").FindStringSubmatch(b.body); len(m) == 2 {
+			sc.Type = strings.Trim(m[1], `"`)
+		}
+		if m := arrayLineRE("required").FindStringSubmatch(b.body); len(m) == 2 {
+			sc.Required = parseStringArray(m[1])
+		}
+		for _, fb := range extractNamedBlocks(b.body, "field") {
+			fc := SchemaFieldConfig{ID: fb.name}
+			if m := identLineRE("type").FindStringSubmatch(fb.body); len(m) == 2 {
+				fc.Type = strings.Trim(m[1], `"`)
+			}
+			if m := boolLineRE("required").FindStringSubmatch(fb.body); len(m) == 2 {
+				fc.Required = strings.EqualFold(m[1], "true")
+			}
+			if m := stringLineRE("format").FindStringSubmatch(fb.body); len(m) == 2 {
+				fc.Format = m[1]
+			}
+			sc.Fields = append(sc.Fields, fc)
+		}
+		if sc.ID != "" {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+type namedBCLBlock struct {
+	name string
+	body string
+}
+
+func extractNamedBlocks(text, kind string) []namedBCLBlock {
+	var out []namedBCLBlock
+	needle := kind + " \""
+	for off := 0; ; {
+		i := strings.Index(text[off:], needle)
+		if i < 0 {
+			break
+		}
+		start := off + i + len(needle)
+		endName := strings.IndexByte(text[start:], '"')
+		if endName < 0 {
+			break
+		}
+		name := text[start : start+endName]
+		braceSearch := start + endName + 1
+		braceRel := strings.IndexByte(text[braceSearch:], '{')
+		if braceRel < 0 {
+			break
+		}
+		open := braceSearch + braceRel
+		close := matchingBrace(text, open)
+		if close < 0 {
+			break
+		}
+		out = append(out, namedBCLBlock{name: name, body: text[open+1 : close]})
+		off = close + 1
+	}
+	return out
+}
+
+func matchingBrace(text string, open int) int {
+	depth := 0
+	inString := false
+	inRaw := false
+	esc := false
+	for i := open; i < len(text); i++ {
+		c := text[i]
+		if inRaw {
+			if c == '`' {
+				inRaw = false
+			}
+			continue
+		}
+		if inString {
+			if esc {
+				esc = false
+				continue
+			}
+			if c == '\\' {
+				esc = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '`':
+			inRaw = true
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func identLineRE(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s+([A-Za-z0-9_\-.]+|"[^"]*")\s*$`)
+}
+func stringLineRE(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s+"([^"]*)"\s*$`)
+}
+func boolLineRE(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s+(true|false)\s*$`)
+}
+func arrayLineRE(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?ms)^\s*` + regexp.QuoteMeta(key) + `\s+\[(.*?)\]`)
+}
+
+func parseStringArray(raw string) []string {
+	var out []string
+	for _, m := range regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(raw, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
 func ConfigHash(cfg *Config) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%#v", cfg)))
 	return hex.EncodeToString(h[:])
@@ -300,6 +503,17 @@ func buildChain(c ChainConfig) *Chain {
 	return &Chain{ID: c.ID, Name: c.Name, Workflows: append([]string(nil), c.Workflows...), Debug: c.Debug, When: c.When, Condition: c.Condition}
 }
 
+func buildDataSpec(c DataConfig) DataSpec {
+	out := DataSpec{Source: c.Source, Map: c.Map, Set: c.Set, Defaults: c.Defaults, Env: c.Env, Services: c.Services, Integrations: c.Integrations, Pick: append([]string(nil), c.Pick...), Omit: append([]string(nil), c.Omit...), Rename: c.Rename, Append: c.Append, Prepend: c.Prepend, Flatten: append([]string(nil), c.Flatten...), Strict: c.Strict}
+	for _, tr := range c.Transforms {
+		out.Transforms = append(out.Transforms, DataTransform{Field: tr.Field, Expr: tr.Expr, Op: tr.Op, Arg: tr.Arg})
+	}
+	for _, fl := range c.Filters {
+		out.Filters = append(out.Filters, DataFilter{Expr: fl.Expr, Mode: fl.Mode})
+	}
+	return out
+}
+
 func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 	if c.ID == "" || c.First == "" {
 		return nil, errors.New("workflow id and first are required")
@@ -307,7 +521,7 @@ func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 	if c.Mode == "" {
 		c.Mode = ModeInline
 	}
-	wf := &Workflow{ID: c.ID, Name: c.Name, Version: c.Version, First: c.First, Debug: c.Debug, MaxVisits: c.MaxVisits, Mode: c.Mode, MigrationPolicy: c.MigrationPolicy, Nodes: map[string]*Node{}, Outgoing: map[string][]*Edge{}, Incoming: map[string][]*Edge{}, FanIn: map[string][]*Edge{}, Metadata: map[string]any{}}
+	wf := &Workflow{ID: c.ID, Name: c.Name, Version: c.Version, First: c.First, Debug: c.Debug, MaxVisits: c.MaxVisits, Mode: c.Mode, InputData: buildDataSpec(c.InputData), OutputData: buildDataSpec(c.OutputData), MigrationPolicy: c.MigrationPolicy, Nodes: map[string]*Node{}, Outgoing: map[string][]*Edge{}, Incoming: map[string][]*Edge{}, FanIn: map[string][]*Edge{}, Metadata: map[string]any{}}
 	if wf.MaxVisits <= 0 {
 		wf.MaxVisits = 256
 	}
@@ -370,7 +584,7 @@ func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 			}
 			cb = &CircuitBreakerPolicy{FailureThreshold: nc.CircuitBreaker.FailureThreshold, ResetAfter: rd}
 		}
-		wf.Nodes[nc.ID] = &Node{ID: nc.ID, Type: nc.Type, Handler: nc.Handler, Workflow: nc.Workflow, Mode: nc.Mode, Await: await, Timeout: d, Retry: nc.Retry, RetryPolicy: rp, Last: nc.Last, Pause: nc.Pause, When: nc.When, Condition: nc.Condition, SkipOnFalse: nc.SkipOnFalse, ContinueOnError: nc.ContinueOnError, Compensate: nc.Compensate, OnError: nc.OnError, OnTimeout: nc.OnTimeout, Pool: nc.Pool, Priority: nc.Priority, RateLimit: rl, CircuitBreaker: cb, Params: nc.Params, Script: nc.Script, InputSchema: nc.InputSchema, OutputSchema: nc.OutputSchema, FailurePolicy: FailurePolicy{Strategy: nc.FailurePolicy.Strategy, ErrorNode: nc.FailurePolicy.ErrorNode, FallbackNode: nc.FailurePolicy.FallbackNode}}
+		wf.Nodes[nc.ID] = &Node{ID: nc.ID, Type: nc.Type, Handler: nc.Handler, Workflow: nc.Workflow, Mode: nc.Mode, Await: await, Timeout: d, Retry: nc.Retry, RetryPolicy: rp, Last: nc.Last, Pause: nc.Pause, When: nc.When, Condition: nc.Condition, SkipOnFalse: nc.SkipOnFalse, ContinueOnError: nc.ContinueOnError, Compensate: nc.Compensate, OnError: nc.OnError, OnTimeout: nc.OnTimeout, Pool: nc.Pool, Priority: nc.Priority, RateLimit: rl, CircuitBreaker: cb, Params: nc.Params, Script: nc.Script, InputSchema: nc.InputSchema, OutputSchema: nc.OutputSchema, FailurePolicy: FailurePolicy{Strategy: nc.FailurePolicy.Strategy, ErrorNode: nc.FailurePolicy.ErrorNode, FallbackNode: nc.FailurePolicy.FallbackNode}, InputData: buildDataSpec(nc.InputData), OutputData: buildDataSpec(nc.OutputData)}
 	}
 	if wf.Nodes[wf.First] == nil {
 		return nil, fmt.Errorf("workflow %s first node %s not found", c.ID, c.First)
@@ -419,7 +633,7 @@ func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 		if !supportedEdge(ec.Type) {
 			return nil, fmt.Errorf("edge %s unsupported type %q", ec.ID, ec.Type)
 		}
-		edge := &Edge{ID: ec.ID, From: sources[0], To: targets[0], Sources: sources, Targets: targets, Type: ec.Type, When: ec.When, Condition: ec.Condition, Strategy: ec.Strategy, MaxConcurrency: ec.MaxConcurrency, FailFast: ec.FailFast, Await: await, Timeout: timeout, Quorum: ec.Quorum, CancelLosers: ec.CancelLosers, Map: ec.Map}
+		edge := &Edge{ID: ec.ID, From: sources[0], To: targets[0], Sources: sources, Targets: targets, Type: ec.Type, When: ec.When, Condition: ec.Condition, Strategy: ec.Strategy, MaxConcurrency: ec.MaxConcurrency, FailFast: ec.FailFast, Await: await, Timeout: timeout, Quorum: ec.Quorum, CancelLosers: ec.CancelLosers, Map: ec.Map, Data: buildDataSpec(ec.Data)}
 		wf.Edges = append(wf.Edges, edge)
 		for _, s := range sources {
 			wf.Outgoing[s] = append(wf.Outgoing[s], edge)

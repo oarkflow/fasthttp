@@ -1,19 +1,92 @@
 workflow "email_flow" {
-  name "Reliable Email Workflow"
-  version "1.0.0"
+  name "Reliable Email Workflow with Data ETL"
+  version "1.1.0"
   first "receive"
   max_visits 256
   debug true
 
+  input_data {
+    defaults {
+      subject "Untitled"
+      body ""
+    }
+    transform {
+      field "to"
+      op lower
+    }
+    transform {
+      field "subject"
+      op trim
+    }
+    transform {
+      field "body"
+      op trim
+    }
+    filter {
+      expr `input.to != "" && input.subject != ""`
+    }
+  }
+
+  output_data {
+    set {
+      workflow "email_flow"
+      version "1.1.0"
+    }
+    env {
+      app_env "DAGFLOW_ENV"
+    }
+  }
+
   node "receive" {
     type function
     handler "receive_email"
+
+    input_data {
+      defaults {
+        source "api"
+      }
+      services {
+        tenant_config "tenant_config:email"
+      }
+      integrations {
+        crm_contact "crm:email-contact"
+      }
+    }
+
+    output_data {
+      pick ["to", "subject", "body"]
+    }
   }
 
   node "validate" {
     type function
     handler "validate_email"
     timeout "2s"
+
+    input_data {
+      transform {
+        field "to"
+        op lower
+      }
+      transform {
+        field "subject"
+        op trim
+      }
+      transform {
+        field "body"
+        op trim
+      }
+      defaults {
+        subject "Untitled"
+      }
+    }
+
+    output_data {
+      set {
+        validation_checked true
+        validation_engine "builtin-email-validator"
+      }
+    }
 
     retry_policy {
       max_attempts 2
@@ -30,6 +103,26 @@ workflow "email_flow" {
     await true
     timeout "3s"
 
+    input_data {
+      source "result"
+      pick ["request", "valid", "reason"]
+      filter {
+        expr `input.valid == true`
+      }
+      integrations {
+        crm_contact "crm:send"
+      }
+    }
+
+    output_data {
+      set {
+        delivery_channel "email"
+      }
+      append {
+        events "=node.id"
+      }
+    }
+
     retry_policy {
       max_attempts 3
       strategy "exponential_jitter"
@@ -44,6 +137,20 @@ workflow "email_flow" {
     handler "store_message"
     mode background
     await true
+
+    input_data {
+      source "result"
+      set {
+        storage_bucket "sent"
+      }
+    }
+
+    output_data {
+      set {
+        persisted true
+        storage_path "messages/sent"
+      }
+    }
   }
 
   node "store_invalid" {
@@ -51,6 +158,20 @@ workflow "email_flow" {
     handler "store_message"
     mode background
     await true
+
+    input_data {
+      source "result"
+      set {
+        storage_bucket "invalid"
+      }
+    }
+
+    output_data {
+      set {
+        persisted true
+        storage_path "messages/invalid"
+      }
+    }
   }
 
   node "audit" {
@@ -58,6 +179,16 @@ workflow "email_flow" {
     handler "audit_event"
     mode background
     await true
+
+    input_data {
+      source "result"
+      services {
+        tenant_config "tenant_config:audit"
+      }
+      set {
+        audit_type "email.delivery"
+      }
+    }
   }
 
   node "notify_success" {
@@ -66,6 +197,13 @@ workflow "email_flow" {
     mode background
     await false
     last true
+
+    input_data {
+      source "result"
+      set {
+        notification "success"
+      }
+    }
   }
 
   node "notify_failure" {
@@ -74,12 +212,32 @@ workflow "email_flow" {
     mode background
     await false
     last true
+
+    input_data {
+      source "result"
+      set {
+        notification "failure"
+      }
+    }
   }
 
   edge "receive_to_validate" {
     from "receive"
     to "validate"
     type simple
+
+    data {
+      source "result"
+      map {
+        to "to"
+        subject "subject"
+        body "body"
+      }
+      transform {
+        field "to"
+        op lower
+      }
+    }
   }
 
   edge "valid_to_send" {
@@ -87,6 +245,17 @@ workflow "email_flow" {
     to "send"
     type branch
     condition "is_email_valid"
+
+    data {
+      source "result"
+      filter {
+        expr `input.valid == true`
+      }
+      pick ["request", "valid", "reason", "validation_checked", "validation_engine"]
+      set {
+        branch "valid"
+      }
+    }
   }
 
   edge "invalid_to_store" {
@@ -94,12 +263,29 @@ workflow "email_flow" {
     to "store_invalid"
     type branch
     condition "is_email_invalid"
+
+    data {
+      source "result"
+      filter {
+        expr `input.valid == false`
+      }
+      set {
+        branch "invalid"
+      }
+    }
   }
 
   edge "send_fanout" {
     from "send"
     targets ["store_valid", "audit"]
     type fanout
+
+    data {
+      source "result"
+      set {
+        fanout_source "send"
+      }
+    }
   }
 
   edge "valid_join" {
@@ -107,17 +293,39 @@ workflow "email_flow" {
     to "notify_success"
     type fanin
     strategy "all"
+
+    data {
+      source "result"
+      flatten ["items"]
+      set {
+        joined true
+      }
+    }
   }
 
   edge "invalid_to_notify" {
     from "store_invalid"
     to "notify_failure"
     type simple
+
+    data {
+      source "result"
+      set {
+        rejected true
+      }
+    }
   }
 
   edge "send_error" {
     from "send"
     to "store_invalid"
     type error
+
+    data {
+      source "result"
+      set {
+        error_path true
+      }
+    }
   }
 }

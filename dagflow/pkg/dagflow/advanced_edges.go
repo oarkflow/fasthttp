@@ -110,7 +110,22 @@ func (e *Engine) runParallelTargets(ctx context.Context, wf *Workflow, task *Tas
 				return
 			}
 			stateKey := n.ID
-			result, err := e.runNode(ctx2, wf, task, n, input, stateKey)
+			nodeInput, derr := e.applyNodeInput(ctx2, wf, task, n, input)
+			if derr != nil {
+				if edge.FailFast {
+					cancel()
+				}
+				resCh <- item{target: n.ID, err: derr}
+				return
+			}
+			result, err := e.runNode(ctx2, wf, task, n, nodeInput, stateKey)
+			if err == nil {
+				result, err = e.applyNodeOutput(ctx2, wf, task, n, result)
+				if st := task.NodeStates[stateKey]; st != nil {
+					st.Result = result
+				}
+				task.NodeResults[stateKey] = result
+			}
 			if err != nil && edge.FailFast {
 				cancel()
 			}
@@ -162,7 +177,19 @@ func (e *Engine) runRaceTargets(ctx context.Context, wf *Workflow, task *Task, e
 			return nil, fmt.Errorf("race target %s not found", targetID)
 		}
 		go func(n *Node) {
-			res, err := e.runNode(ctx2, wf, task, n, input, n.ID)
+			nodeInput, err := e.applyNodeInput(ctx2, wf, task, n, input)
+			if err != nil {
+				resCh <- item{target: n.ID, err: err}
+				return
+			}
+			res, err := e.runNode(ctx2, wf, task, n, nodeInput, n.ID)
+			if err == nil {
+				res, err = e.applyNodeOutput(ctx2, wf, task, n, res)
+				if st := task.NodeStates[n.ID]; st != nil {
+					st.Result = res
+				}
+				task.NodeResults[n.ID] = res
+			}
 			resCh <- item{target: n.ID, result: res, err: err}
 		}(target)
 	}

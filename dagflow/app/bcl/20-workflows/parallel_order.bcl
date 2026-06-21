@@ -1,34 +1,95 @@
 workflow "parallel_order_checks" {
-  name "Parallel Order Checks"
-  version "1.0.0"
+  name "Parallel Order Checks with Request Data Mapping"
+  version "1.1.0"
   first "receive"
   max_visits 128
   debug true
 
+  input_data {
+    defaults {
+      order_id "unknown"
+    }
+  }
+
   node "receive" {
     type function
-    handler "receive_email"
+    handler "identity"
+
+    input_data {
+      source "input"
+      map {
+        order_id "path.order_id"
+        customer_id "body.customer_id"
+        amount "body.amount"
+        currency "body.currency"
+        idempotency_key "headers.Idempotency-Key"
+      }
+      defaults {
+        currency "USD"
+      }
+      transform {
+        field "currency"
+        op upper
+      }
+      services {
+        tenant_config "tenant_config:orders"
+      }
+    }
   }
 
   node "check_inventory" {
     type function
     handler "check_inventory"
+
+    input_data {
+      source "result"
+      pick ["order_id", "customer_id", "tenant_config"]
+      set {
+        check_type "inventory"
+      }
+    }
   }
 
   node "check_payment" {
     type function
     handler "check_payment"
+
+    input_data {
+      source "result"
+      pick ["order_id", "amount", "currency", "customer_id"]
+      set {
+        check_type "payment"
+      }
+    }
   }
 
   node "check_fraud" {
     type function
     handler "check_fraud"
+
+    input_data {
+      source "result"
+      pick ["order_id", "amount", "customer_id", "client_ip"]
+      integrations {
+        fraud_profile "crm:fraud-profile"
+      }
+      set {
+        check_type "fraud"
+      }
+    }
   }
 
   node "approve" {
     type function
     handler "approve_order"
     last true
+
+    input_data {
+      source "result"
+      set {
+        approval_policy "all-checks-passed"
+      }
+    }
   }
 
   edge "parallel_checks" {
@@ -37,6 +98,13 @@ workflow "parallel_order_checks" {
     type parallel
     max_concurrency 3
     fail_fast true
+
+    data {
+      source "result"
+      filter {
+        expr `input.order_id != ""`
+      }
+    }
   }
 
   edge "join_checks" {
@@ -44,5 +112,12 @@ workflow "parallel_order_checks" {
     to "approve"
     type fanin
     strategy "all"
+
+    data {
+      source "result"
+      set {
+        joined_checks true
+      }
+    }
   }
 }

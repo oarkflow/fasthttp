@@ -1,0 +1,123 @@
+workflow "data_etl_demo" {
+  name "Comprehensive Data Handling Demo"
+  version "1.0.0"
+  first "normalize"
+  max_visits 128
+  debug true
+
+  input_data {
+    source "input"
+    map {
+      user_name "body.user.name"
+      user_email "body.user.email"
+      user_role "body.user.role"
+      tags "body.tags"
+      account_id "path.account_id"
+      trace_id "headers.X-Trace-ID"
+      query_source "query.source"
+      client_ip "client_ip"
+    }
+    defaults {
+      user_role "guest"
+      tags []
+      query_source "direct"
+    }
+    env {
+      app_env "DAGFLOW_ENV"
+    }
+    services {
+      tenant_config "tenant_config:data-demo"
+    }
+    integrations {
+      crm_contact "crm:data-demo"
+    }
+    transform {
+      field "user_email"
+      op lower
+    }
+    transform {
+      field "user_name"
+      op trim
+    }
+    append {
+      tags "query_source"
+    }
+    filter {
+      expr `input.user_email != "" && input.account_id != ""`
+    }
+  }
+
+  output_data {
+    set {
+      workflow "data_etl_demo"
+      completed true
+    }
+  }
+
+  node "normalize" {
+    type function
+    handler "identity"
+
+    output_data {
+      rename {
+        query_source "source"
+      }
+      set {
+        normalized true
+      }
+    }
+  }
+
+  node "inspect" {
+    type function
+    handler "inspect_data"
+
+    input_data {
+      source "result"
+      pick ["user_name", "user_email", "user_role", "tags", "account_id", "trace_id", "source", "client_ip", "tenant_config", "crm_contact", "app_env", "normalized"]
+      prepend {
+        tags "account_id"
+      }
+    }
+  }
+
+  node "finish" {
+    type function
+    handler "api_response"
+    last true
+
+    input_data {
+      source "result"
+      set {
+        final_shape "api-response"
+      }
+    }
+  }
+
+  edge "normalize_to_inspect" {
+    from "normalize"
+    to "inspect"
+    type simple
+
+    data {
+      source "result"
+      omit ["headers"]
+      set {
+        edge_name "normalize_to_inspect"
+      }
+    }
+  }
+
+  edge "inspect_to_finish" {
+    from "inspect"
+    to "finish"
+    type simple
+
+    data {
+      source "result"
+      map {
+        data "result"
+      }
+    }
+  }
+}

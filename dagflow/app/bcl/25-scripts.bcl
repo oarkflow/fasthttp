@@ -5,7 +5,9 @@ script "script_enrich_email" {
       "to": req.to,
       "subject": "[script] " + req.subject,
       "body": req.body,
-      "enriched": true
+      "enriched": true,
+      "app_env": req.app_env,
+      "tenant_config": req.tenant_config
     };
   `
 }

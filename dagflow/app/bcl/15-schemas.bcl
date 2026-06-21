@@ -1,7 +1,3 @@
-# Optional schemas. They are intentionally not referenced by nodes/routes in this
-# compatibility BCL because some generated core versions did not merge schema
-# blocks before validation. Keeping them here is harmless and allows future
-# OpenAPI/schema support once the core decoder is corrected.
 schema "EmailRequest" {
   type object
   required ["to", "subject", "body"]
@@ -25,4 +21,37 @@ schema "EmailRequest" {
 
 schema "EmailResponse" {
   type object
+}
+
+schema "OrderCheckRequest" {
+  type object
+  required ["customer_id", "amount"]
+
+  field "customer_id" {
+    type string
+    required true
+  }
+
+  field "amount" {
+    type number
+    required true
+  }
+
+  field "currency" {
+    type string
+  }
+}
+
+schema "DataETLRequest" {
+  type object
+  required ["user"]
+
+  field "user" {
+    type object
+    required true
+  }
+
+  field "tags" {
+    type array
+  }
 }

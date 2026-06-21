@@ -1495,3 +1495,388 @@ SLO dashboards
 ```
 
 ---
+
+---
+
+## Enterprise data handling layer
+
+This build adds a generic data-handling layer to `pkg/dagflow` without moving business behavior into the core. Data handling can now be applied at these boundaries:
+
+- route input before schema validation and workflow dispatch,
+- workflow input and workflow output,
+- node input before handler/script/workflow execution,
+- node output after execution and before persistence/edge routing,
+- edge handoff for simple, branch, fanout, iterator, error, fallback, timeout, retry, and compensation edges,
+- standalone node execution,
+- chain execution through normal workflow input/output boundaries.
+
+The engine keeps data operations generic. Business applications can register data sources with:
+
+```go
+engine.RegisterDataSource("service:tenant_config", func(ctx context.Context, dc *dagflow.DataContext, key string) (any, error) {
+    return map[string]any{"tenant":"demo", "plan":"enterprise", "key":key}, nil
+})
+
+engine.RegisterDataSource("integration:crm", func(ctx context.Context, dc *dagflow.DataContext, key string) (any, error) {
+    return map[string]any{"external_id":"crm-123", "key":key}, nil
+})
+```
+
+The bundled example app registers two concrete example sources: `service:tenant_config` and `integration:crm`.
+
+### Data sources available to rules
+
+Data rules can read from:
+
+```txt
+input                  current payload at the boundary
+result                 current payload/result at the boundary
+request.body           HTTP request body when used on routes
+request.path           HTTP path parameters
+request.query          HTTP query parameters
+request.headers        HTTP headers
+request.method         HTTP method
+request.client_ip      resolved client IP
+task.input             original task input
+task.last_result       latest task result
+task.results           results by node id
+workflow.id/version    current workflow metadata
+node.id/type/handler   current node metadata
+node.params            node params
+edge.id/from/to/type    current edge metadata
+env.NAME or $env.NAME  environment variables
+service.NAME:key       registered service data source
+integration.NAME:key   registered integration data source
+```
+
+### Data operations
+
+`DataSpec` supports real operations, not stubs:
+
+```txt
+source       replace the current payload with a source path or expression
+pick         keep only selected paths
+omit         remove paths
+rename       move one path to another path
+map          set target paths from source paths or expressions
+set          set literal, env, service, integration, or expression values
+defaults     set values only when the target path is missing
+env          set fields from environment variables
+services     set fields from registered service data sources
+integrations set fields from registered integration data sources
+transform    upper/lower/trim/prefix/suffix/replace/int/float/bool/json/string/expr
+filter       keep/drop payloads using BCL boolean expressions
+append       append a value or list into a list field
+prepend      prepend a value or list into a list field
+flatten      flatten a one-level nested list field
+strict       fail when expected source paths are missing
+```
+
+### BCL examples
+
+Route-level request ETL:
+
+```hcl
+route "send_email_normalized" {
+  method "POST"
+  path "/send-normalized"
+  workflow "email_flow"
+  mode sync
+  envelope true
+
+  data {
+    source "request"
+    map {
+      to      "body.to"
+      subject "body.subject"
+      body    "body.body"
+      ip      "client_ip"
+    }
+    env {
+      app_env "DAGFLOW_ENV"
+    }
+    services {
+      tenant "tenant_config:default"
+    }
+    transform {
+      field "subject"
+      op trim
+    }
+    filter {
+      expr `input.to != "" && input.subject != "" && input.body != ""`
+    }
+  }
+}
+```
+
+Node input and output transformation:
+
+```hcl
+node "validate" {
+  type function
+  handler "validate_email"
+
+  input_data {
+    defaults {
+      subject "Untitled"
+    }
+    transform {
+      field "to"
+      op lower
+    }
+  }
+
+  output_data {
+    map {
+      request "input.request"
+      valid   "input.valid"
+      reason  "input.reason"
+    }
+    set {
+      checked_by "dagflow"
+    }
+  }
+}
+```
+
+Edge-level mapping, filtering, and ETL:
+
+```hcl
+edge "valid_to_send" {
+  from "validate"
+  to "send"
+  type branch
+  condition "is_email_valid"
+
+  data {
+    source "result"
+    filter {
+      expr `input.valid == true`
+    }
+    map {
+      to      "request.to"
+      subject "request.subject"
+      body    "request.body"
+    }
+    integrations {
+      crm "crm:contact"
+    }
+  }
+}
+```
+
+Iterator ETL:
+
+```hcl
+edge "each" {
+  from "items"
+  to "upper"
+  type iterator
+
+  data {
+    source "result.items"
+    filter {
+      expr `len(input) > 0`
+    }
+  }
+}
+```
+
+The old `edge.map` field remains supported for backward compatibility. If an edge has no `data {}` block but has `map`, the engine treats it as `data.map`.
+
+
+### Runnable cURL examples for the updated app BCL
+
+Start the server:
+
+```bash
+export DAGFLOW_ENV=dev
+# from the extracted project root
+go run . serve
+```
+
+All `/api/*` routes require the demo API key:
+
+```bash
+export API='http://localhost:8080'
+export KEY='X-API-Key: dev-secret'
+```
+
+#### 1) Sync email workflow: route data mapping → workflow input transforms → branch → fanout/fanin
+
+This exercises route `data { source "request" ... }`, workflow `input_data`, node `input_data/output_data`, branch edge filters, fanout edge data, fanin edge data, service source, integration source, and environment source.
+
+```bash
+curl -s -X POST "$API/api/email/send" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: req-demo-001' \
+  -d '{
+    "to": "ALICE@EXAMPLE.COM",
+    "subject": "  Hello from DAGFlow data ETL  ",
+    "body": " This message is normalized before execution. "
+  }' | jq
+```
+
+Expected: HTTP `200`; task status should be `completed`; node states should show `receive`, `validate`, `send`, `store_valid`, `audit`, and `notify_success`. The stored node inputs/results include normalized lowercase email, trimmed subject/body, tenant config, CRM data, and edge metadata.
+
+#### 2) Invalid email branch: route mapping → validation branch → invalid store → failure notification
+
+```bash
+curl -s -X POST "$API/api/email/send" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "not-an-email",
+    "subject": "Rejected example",
+    "body": "This should go to the invalid branch."
+  }' | jq
+```
+
+Expected: HTTP `200`; `validate.valid` should be `false`; the branch should route to `store_invalid` and `notify_failure` without running `send`.
+
+#### 3) Async email workflow with transformed request data
+
+```bash
+curl -s -X POST "$API/api/email/send/async" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "ASYNC@EXAMPLE.COM",
+    "subject": "Async ETL",
+    "body": "Async route still maps and transforms data."
+  }' | jq
+```
+
+Expected: HTTP `202` with a task object. Use the returned `id` with the ops task endpoint.
+
+#### 4) Script enrichment route: route transform + script node input/output data
+
+```bash
+curl -s -X POST "$API/api/email/script-enrich?source=docs" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "SCRIPT@EXAMPLE.COM",
+    "subject": "  Script subject  ",
+    "body": "Script body"
+  }' | jq
+```
+
+Expected: subject is prefixed at the route, then prefixed again by the script; output includes `enriched_by`, `app_env`, and `tenant_config`.
+
+#### 5) Chain route: one normalized payload through `email_flow` then `audit_flow`
+
+```bash
+curl -s -X POST "$API/api/email/send-and-audit?source=curl" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "CHAIN@EXAMPLE.COM",
+    "subject": "Chain ETL",
+    "body": "Email result becomes audit input."
+  }' | jq
+```
+
+Expected: chain result with two task entries: first email, then audit. The audit workflow adds service/env data using `input_data`.
+
+#### 6) Inline workflow reuse route: workflow node data mapping between sub-workflows
+
+```bash
+curl -s -X POST "$API/api/email/send-inline-reuse" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": "INLINE@EXAMPLE.COM",
+    "subject": "Inline workflow reuse",
+    "body": "The email workflow output is mapped into audit workflow input."
+  }' | jq
+```
+
+Expected: one parent task whose workflow node runs `email_flow`, then maps its result into `audit_flow`.
+
+#### 7) Data ETL demo: body + path params + query + headers + env + service + integration
+
+This is the clearest end-to-end data-handling example.
+
+```bash
+curl -s -X POST "$API/api/data/acct_123/etl?source=partner" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Trace-ID: trace-789' \
+  -d '{
+    "user": {
+      "name": "  Jane Doe  ",
+      "email": "JANE@EXAMPLE.COM",
+      "role": "manager"
+    },
+    "tags": ["new", "priority"]
+  }' | jq
+```
+
+Expected: the workflow maps `body.user.*`, `path.account_id`, `query.source`, `headers.X-Trace-ID`, and `client_ip`; applies defaults; lowercases email; trims name; appends/prepends tags; adds service/integration/env values; and returns an `api_response` shape.
+
+#### 8) Parallel order checks: route path/query/body/header mapping → parallel fanout → fanin approval
+
+```bash
+curl -s -X POST "$API/api/orders/order_1001/check" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: idem-order-1001' \
+  -d '{
+    "customer_id": "cust_99",
+    "amount": 149.95,
+    "currency": "usd"
+  }' | jq
+```
+
+Expected: `receive` normalizes route/body/header data, `check_inventory`, `check_payment`, and `check_fraud` run in parallel, and `approve` receives the joined result.
+
+#### 9) Iterator data handling: list extraction from request envelope → per-item transform
+
+```bash
+curl -s -X POST "$API/api/files/uploads/demo.txt?source=curl" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"items": [" alpha ", "beta", "Gamma"]}' | jq
+```
+
+Expected: route data extracts `body.items` and wildcard path, iterator edge emits each item to `upper`, and node transforms produce uppercase values.
+
+#### 10) Route data filter failure
+
+```bash
+curl -i -s -X POST "$API/api/email/send" \
+  -H "$KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"to": "", "subject": "", "body": "filtered"}'
+```
+
+Expected: HTTP `422` with `request filtered by route data policy` because the route `filter` rejects empty `to`/`subject` before the workflow starts.
+
+
+### Data failure behavior
+
+- Missing paths are ignored by default so existing workflows do not break.
+- `strict true` turns missing paths into errors.
+- A filter returning false produces `ErrDataFiltered`; routes return `422`, nodes are marked skipped, and edges simply do not emit a run item.
+- All transformed inputs/results are stored in normal task/node state, so operations remain visible through `/ops/tasks/:id`, audit logs, and graph/status APIs.
+
+
+### Runtime configuration validation fixes
+
+The loader now performs deterministic per-file BCL loading plus a schema-block reconciliation pass. This prevents runtime-only failures such as:
+
+```json
+{"detail":"schema EmailRequest not found","error":"schema validation failed"}
+```
+
+Run validation before serving:
+
+```bash
+go run . validate app/bcl
+```
+
+The validation command now fails fast for route-level `input_schema` and `output_schema` references, not only node-level schema references. That means a missing `EmailRequest`, `OrderCheckRequest`, or any future route schema is caught at startup instead of during the first request.
+
+The request envelope mapper was also fixed so route data expressions like `body.to`, `path.order_id`, `query.source`, and `headers.X-Request-ID` resolve against the actual HTTP request envelope used by curl examples.

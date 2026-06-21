@@ -1,34 +1,94 @@
 workflow "batch_uppercase" {
-  name "Batch Uppercase Iterator Workflow"
-  version "1.0.0"
+  name "Batch Uppercase Iterator Workflow with Data ETL"
+  version "1.1.0"
   first "items"
   max_visits 256
+
+  input_data {
+    source "input"
+    defaults {
+      items []
+    }
+  }
+
+  output_data {
+    set {
+      workflow "batch_uppercase"
+    }
+  }
 
   node "items" {
     type function
     handler "identity"
+
+    input_data {
+      source "input"
+      map {
+        items "body.items"
+        path "path.path"
+        client_ip "client_ip"
+      }
+      defaults {
+        items []
+      }
+    }
+
+    output_data {
+      pick ["items", "path", "client_ip"]
+    }
   }
 
   node "upper" {
     type function
     handler "uppercase"
+
+    input_data {
+      source "result"
+      transform {
+        op trim
+      }
+    }
+
+    output_data {
+      transform {
+        op upper
+      }
+    }
   }
 
   node "done" {
     type function
     handler "identity"
     last true
+
+    input_data {
+      source "result"
+      set {
+        completed true
+      }
+    }
   }
 
   edge "each" {
     from "items"
     to "upper"
     type iterator
+
+    data {
+      source "result.items"
+    }
   }
 
   edge "upper_done" {
     from "upper"
     to "done"
     type simple
+
+    data {
+      source "result"
+      append {
+        processed "=result"
+      }
+    }
   }
 }

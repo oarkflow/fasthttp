@@ -1,18 +1,41 @@
 workflow "email_approval_flow" {
-  name "Human Approval Email Workflow"
-  version "1.0.0"
+  name "Human Approval Email Workflow with Resume Data Mapping"
+  version "1.1.0"
   first "receive"
   max_visits 128
   debug true
 
+  input_data {
+    transform {
+      field "to"
+      op lower
+    }
+    transform {
+      field "subject"
+      op trim
+    }
+  }
+
   node "receive" {
     type function
     handler "receive_email"
+
+    output_data {
+      pick ["to", "subject", "body"]
+    }
   }
 
   node "approval" {
     type page
     pause true
+
+    input_data {
+      source "result"
+      set {
+        page "approval"
+        instructions "POST resume payload with approved=true to continue"
+      }
+    }
   }
 
   node "send" {
@@ -20,18 +43,48 @@ workflow "email_approval_flow" {
     handler "send_email"
     mode background
     await true
+
+    input_data {
+      source "result"
+      map {
+        to "to"
+        subject "subject"
+        body "body"
+        valid "approved"
+      }
+      defaults {
+        valid true
+      }
+      filter {
+        expr `input.valid == true`
+      }
+    }
   }
 
   node "store" {
     type function
     handler "store_message"
     last true
+
+    input_data {
+      source "result"
+      set {
+        approval_flow true
+      }
+    }
   }
 
   edge "receive_to_approval" {
     from "receive"
     to "approval"
     type simple
+
+    data {
+      source "result"
+      set {
+        awaiting_approval true
+      }
+    }
   }
 
   edge "approval_to_send" {
@@ -39,11 +92,28 @@ workflow "email_approval_flow" {
     to "send"
     type branch
     when `result.approved == true`
+
+    data {
+      source "result"
+      map {
+        to "to"
+        subject "subject"
+        body "body"
+        approved "approved"
+      }
+    }
   }
 
   edge "send_to_store" {
     from "send"
     to "store"
     type simple
+
+    data {
+      source "result"
+      set {
+        approved_and_sent true
+      }
+    }
   }
 }

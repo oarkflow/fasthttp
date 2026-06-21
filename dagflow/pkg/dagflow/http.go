@@ -165,6 +165,13 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 	if err != nil {
 		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
+	input, err = a.engine.applyData(c.Context(), buildDataSpec(rc.Data), &DataContext{Route: &rc, Input: input, Result: input, Request: requestData(c, params, input)}, input)
+	if err != nil {
+		if errors.Is(err, ErrDataFiltered) {
+			return writeJSON(c, fh.StatusUnprocessableEntity, map[string]any{"error": "request filtered by route data policy"})
+		}
+		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "route data policy failed", "detail": err.Error()})
+	}
 	if err := a.engine.ValidateAgainstSchema(rc.InputSchema, input); err != nil {
 		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "schema validation failed", "detail": err.Error()})
 	}
@@ -313,7 +320,7 @@ func readInput(c *fh.Ctx, params map[string]string, envelope bool) (any, error) 
 		}
 	}
 	if envelope {
-		return map[string]any{"body": body, "path": params, "query": query, "method": c.Method()}, nil
+		return map[string]any{"body": body, "path": params, "query": query, "headers": requestHeaders(c), "method": c.Method(), "client_ip": clientIP(c)}, nil
 	}
 	if len(params) > 0 || len(query) > 0 {
 		if m, ok := body.(map[string]any); ok {
@@ -329,6 +336,62 @@ func readInput(c *fh.Ctx, params map[string]string, envelope bool) (any, error) 
 		}
 	}
 	return body, nil
+}
+
+func requestHeaders(c *fh.Ctx) map[string]any {
+	headers := map[string]any{}
+	if c == nil {
+		return headers
+	}
+	for k, v := range c.GetReqHeaders() {
+		var val any
+		if len(v) == 1 {
+			val = v[0]
+		} else {
+			val = v
+		}
+		headers[k] = val
+		canonical := httpCanonicalHeaderKey(k)
+		headers[canonical] = val
+		headers[strings.ToLower(k)] = val
+	}
+	return headers
+}
+
+func httpCanonicalHeaderKey(k string) string {
+	parts := strings.Split(k, "-")
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
+	}
+	return strings.Join(parts, "-")
+}
+
+func requestData(c *fh.Ctx, params map[string]string, body any) map[string]any {
+	query := map[string]any{}
+	if c != nil {
+		_ = c.QueryParser(&query)
+	}
+	method, path := "", ""
+	if c != nil {
+		method, path = c.Method(), c.Path()
+	}
+	if m, ok := body.(map[string]any); ok {
+		if _, hasBody := m["body"]; hasBody {
+			req := cloneAny(m)
+			if rm, ok := req.(map[string]any); ok {
+				rm["method"] = method
+				rm["path_value"] = path
+				if _, ok := rm["client_ip"]; !ok {
+					rm["client_ip"] = clientIP(c)
+				}
+				return rm
+			}
+		}
+	}
+	return map[string]any{"body": body, "path": params, "query": query, "headers": requestHeaders(c), "method": method, "path_value": path, "client_ip": clientIP(c)}
 }
 
 func buildMiddleware(cfg MiddlewareConfig) (fh.HandlerFunc, error) {

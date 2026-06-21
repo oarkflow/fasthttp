@@ -1,39 +1,82 @@
 workflow "audit_flow" {
-  name "Audit Workflow"
-  version "1.0.0"
+  name "Audit Workflow with Data Sources"
+  version "1.1.0"
   first "audit"
+
+  input_data {
+    source "input"
+    services {
+      tenant_config "tenant_config:audit-flow"
+    }
+    env {
+      app_env "DAGFLOW_ENV"
+    }
+  }
 
   node "audit" {
     type function
     handler "audit_event"
     last true
+
+    input_data {
+      source "input"
+      set {
+        audit_workflow true
+      }
+    }
+  }
+
+  output_data {
+    set {
+      workflow "audit_flow"
+    }
   }
 }
 
 workflow "email_then_audit_inside_dag" {
-  name "Email Then Audit Reuse Workflow"
-  version "1.0.0"
+  name "Email Then Audit Reuse Workflow with Edge Mapping"
+  version "1.1.0"
   first "email"
 
   node "email" {
     type workflow
     workflow "email_flow"
+
+    input_data {
+      source "input"
+      pick ["to", "subject", "body"]
+    }
   }
 
   node "audit" {
     type workflow
     workflow "audit_flow"
     last true
+
+    input_data {
+      source "result"
+      set {
+        audit_reason "email-workflow-completed"
+      }
+    }
   }
 
   edge "email_to_audit" {
     from "email"
     to "audit"
     type simple
+
+    data {
+      source "result"
+      set {
+        chained true
+      }
+    }
   }
 }
 
 chain "email_api_chain" {
   name "Email then Audit Chain"
   workflows ["email_flow", "audit_flow"]
+  debug true
 }

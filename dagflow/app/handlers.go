@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,12 @@ type StoreResult struct {
 }
 
 func RegisterExampleHandlers(e *dagflow.Engine) {
+	e.RegisterDataSource("service:tenant_config", func(ctx context.Context, dc *dagflow.DataContext, key string) (any, error) {
+		return map[string]any{"tenant": "demo", "plan": "enterprise", "key": key}, nil
+	})
+	e.RegisterDataSource("integration:crm", func(ctx context.Context, dc *dagflow.DataContext, key string) (any, error) {
+		return map[string]any{"integration": "crm", "external_id": dagflow.NewID("crm"), "key": key}, nil
+	})
 	e.Register("receive_email", func(rc *dagflow.ExecutionContext, input any) (any, error) {
 		var req EmailRequest
 		b, _ := json.Marshal(input)
@@ -122,7 +129,18 @@ func RegisterExampleHandlers(e *dagflow.Engine) {
 		return map[string]any{"approved": true, "checks": input, "approved_at": time.Now()}, nil
 	})
 	e.Register("api_response", func(rc *dagflow.ExecutionContext, input any) (any, error) {
-		return map[string]any{"success": true, "data": input}, nil
+		return map[string]any{"success": true, "data": input, "task_id": rc.TaskID, "node_id": rc.NodeID}, nil
+	})
+	e.Register("inspect_data", func(rc *dagflow.ExecutionContext, input any) (any, error) {
+		return map[string]any{
+			"inspected":     true,
+			"input":         input,
+			"task_id":       rc.TaskID,
+			"node_id":       rc.NodeID,
+			"previous_node": rc.PreviousNode,
+			"node_results":  rc.NodeResults,
+			"data_context":  rc.DataContext,
+		}, nil
 	})
 	e.Register("receive_batch", func(rc *dagflow.ExecutionContext, input any) (any, error) { xs, err := toSlice(input); return xs, err })
 	e.Register("uppercase_one", func(rc *dagflow.ExecutionContext, input any) (any, error) {
@@ -151,9 +169,30 @@ func toEmailValidation(v any) EmailValidationResult {
 	if x, ok := v.(EmailValidationResult); ok {
 		return x
 	}
+	if x, ok := v.(EmailRequest); ok {
+		return EmailValidationResult{Request: x, Valid: x.To != "" && strings.Contains(x.To, "@") && strings.TrimSpace(x.Subject) != "" && strings.TrimSpace(x.Body) != ""}
+	}
 	var out EmailValidationResult
 	b, _ := json.Marshal(v)
 	_ = json.Unmarshal(b, &out)
+	if out.Request.To == "" {
+		var req EmailRequest
+		_ = json.Unmarshal(b, &req)
+		if req.To != "" || req.Subject != "" || req.Body != "" {
+			out.Request = req
+		}
+	}
+	if !out.Valid {
+		var m map[string]any
+		if json.Unmarshal(b, &m) == nil {
+			if approved, ok := m["approved"].(bool); ok {
+				out.Valid = approved
+			}
+			if valid, ok := m["valid"].(bool); ok {
+				out.Valid = valid
+			}
+		}
+	}
 	return out
 }
 func normalizeEmailResult(v any) any {
