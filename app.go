@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+type Map map[string]any
+
 // ── Lifecycle events ───────────────────────────────────────────────────────
 
 // HookFunc is a lifecycle hook with optional error propagation.

@@ -70,11 +70,16 @@ type h2Conn struct {
 	enc     *hpack.Encoder
 	dec     *hpack.Decoder
 
-	mu         sync.Mutex
-	streams    map[uint32]*h2Stream
-	lastStream uint32
-	draining   atomic.Bool
-	closed     atomic.Bool
+	mu                  sync.Mutex
+	streams             map[uint32]*h2Stream
+	lastStream          uint32
+	draining            atomic.Bool
+	closed              atomic.Bool
+	settingsAwaitingAck atomic.Bool
+
+	// streamSem bounds concurrently executing handlers. MaxConcurrentStreams bounds
+	// open streams, while this protects the scheduler/handler layer too.
+	streamSem chan struct{}
 
 	flowMu            sync.Mutex
 	flowCond          *sync.Cond
@@ -116,6 +121,7 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 	h := &h2Conn{
 		app: app, conn: conn, r: conn,
 		streams:           make(map[uint32]*h2Stream),
+		streamSem:         make(chan struct{}, maxH2ConcurrentStreams(app)),
 		connSendWindow:    h2InitialWindow,
 		peerInitialWindow: h2InitialWindow,
 	}
@@ -124,11 +130,65 @@ func newH2Conn(app *App, conn net.Conn) *h2Conn {
 	h.flowCond = sync.NewCond(&h.flowMu)
 	h.enc = hpack.NewEncoder(&h.encBuf)
 	h.dec = hpack.NewDecoder(4096, func(hpack.HeaderField) {})
-	h.dec.SetMaxStringLength(app.cfg.MaxHeaderListSize)
+	h.dec.SetMaxStringLength(maxH2HeaderListSize(app))
 	return h
 }
 
+func maxH2ConcurrentStreams(app *App) uint32 {
+	n := app.cfg.MaxConcurrentStreams
+	if n == 0 {
+		return 128
+	}
+	return n
+}
+
+func maxH2HeaderListSize(app *App) int {
+	n := app.cfg.MaxHeaderListSize
+	if n <= 0 {
+		return 64 << 10
+	}
+	return n
+}
+
+func maxH2RequestBodySize(app *App) int {
+	n := app.cfg.MaxRequestBodySize
+	if n <= 0 {
+		return 4 << 20
+	}
+	return n
+}
+
+func (h *h2Conn) newStreamContext() (context.Context, context.CancelFunc) {
+	// Keep this implementation dependency-light: it uses the existing WriteTimeout
+	// as an upper bound for handler lifetime if configured. If your Config has a
+	// dedicated HandlerTimeout, replace this with that field.
+	if h.app.cfg.WriteTimeout > 0 {
+		return context.WithTimeout(context.Background(), h.app.cfg.WriteTimeout)
+	}
+	return context.WithCancel(context.Background())
+}
+
+func (h *h2Conn) closeAllStreams() {
+	h.markClosed()
+
+	h.mu.Lock()
+	streams := h.streams
+	h.streams = make(map[uint32]*h2Stream)
+	h.mu.Unlock()
+
+	for _, s := range streams {
+		s.reset.Store(true)
+		if s.cancel != nil {
+			s.cancel()
+		}
+	}
+
+	_ = h.conn.Close()
+}
+
 func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
+	defer h.closeAllStreams()
+
 	if len(initial) > 0 {
 		h.r = io.MultiReader(bytes.NewReader(initial), h.conn)
 	}
@@ -140,6 +200,9 @@ func (h *h2Conn) serve(initial []byte, prefaceConsumed bool) {
 		return
 	}
 	if !prefaceConsumed {
+		if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
+			_ = h.conn.SetReadDeadline(time.Now().Add(timeout))
+		}
 		var preface [24]byte
 		if _, err := io.ReadFull(h.r, preface[:]); err != nil {
 			return
@@ -188,7 +251,7 @@ func (h *h2Conn) prepareUpgrade(c *Ctx) error {
 	if err := h.applySettings(settings); err != nil {
 		return err
 	}
-	streamCtx, cancel := context.WithCancel(context.Background())
+	streamCtx, cancel := h.newStreamContext()
 	s := &h2Stream{
 		id: 1, method: string(c.Header.Method), path: string(c.Header.URI),
 		authority: string(c.Header.Host), scheme: "http", body: append([]byte(nil), c.body...),
@@ -217,21 +280,39 @@ func (e h2ConnError) Error() string {
 }
 
 func (h *h2Conn) readFrame() (h2Frame, error) {
+	if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
+		_ = h.conn.SetReadDeadline(time.Now().Add(timeout))
+	}
+
 	var head [9]byte
 	if _, err := io.ReadFull(h.r, head[:]); err != nil {
+		h.markClosed()
 		return h2Frame{}, err
 	}
+
 	length := int(head[0])<<16 | int(head[1])<<8 | int(head[2])
 	if length > int(h2DefaultFrame) {
 		return h2Frame{}, h2ConnError{h2FrameSizeError}
 	}
+
 	streamID := binary.BigEndian.Uint32(head[5:9])
 	if streamID&0x80000000 != 0 {
 		return h2Frame{}, h2ConnError{h2ProtocolError}
 	}
-	f := h2Frame{typ: head[3], flags: head[4], streamID: streamID, payload: make([]byte, length)}
-	_, err := io.ReadFull(h.r, f.payload)
-	return f, err
+
+	f := h2Frame{
+		typ:      head[3],
+		flags:    head[4],
+		streamID: streamID & 0x7fffffff,
+		payload:  make([]byte, length),
+	}
+	if length > 0 {
+		if _, err := io.ReadFull(h.r, f.payload); err != nil {
+			h.markClosed()
+			return h2Frame{}, err
+		}
+	}
+	return f, nil
 }
 
 func (h *h2Conn) handleFrame(f h2Frame) error {
@@ -267,15 +348,23 @@ func (h *h2Conn) handleFrame(f h2Frame) error {
 		if f.streamID != 0 || len(f.payload) < 8 {
 			return h2ConnError{h2FrameSizeError}
 		}
+		_ = binary.BigEndian.Uint32(f.payload[:4]) & 0x7fffffff
 		h.draining.Store(true)
 	case h2Priority:
 		if f.streamID == 0 || len(f.payload) != 5 {
 			return h2ConnError{h2FrameSizeError}
 		}
+		dep := binary.BigEndian.Uint32(f.payload[:4]) & 0x7fffffff
+		if dep == f.streamID {
+			return h2ConnError{h2ProtocolError}
+		}
 	case h2PushPromise:
 		return h2ConnError{h2ProtocolError}
 	case h2Continuation:
 		return h2ConnError{h2ProtocolError}
+	default:
+		// Unknown extension frame types are explicitly ignored by HTTP/2 receivers.
+		return nil
 	}
 	return nil
 }
@@ -287,6 +376,9 @@ func (h *h2Conn) handleSettings(f h2Frame) error {
 	if f.flags&h2FlagAck != 0 {
 		if len(f.payload) != 0 {
 			return h2ConnError{h2FrameSizeError}
+		}
+		if !h.settingsAwaitingAck.CompareAndSwap(true, false) {
+			return h2ConnError{h2ProtocolError}
 		}
 		return nil
 	}
@@ -351,6 +443,9 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 		return err
 	}
 	block := append([]byte(nil), fragment...)
+	if len(block) > maxH2HeaderListSize(h.app) {
+		return h2ConnError{h2CompressionError}
+	}
 	for f.flags&h2FlagEndHeaders == 0 {
 		next, readErr := h.readFrame()
 		if readErr != nil {
@@ -360,7 +455,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			return h2ConnError{h2ProtocolError}
 		}
 		block = append(block, next.payload...)
-		if len(block) > h.app.cfg.MaxHeaderListSize {
+		if len(block) > maxH2HeaderListSize(h.app) {
 			return h2ConnError{h2CompressionError}
 		}
 		f.flags = next.flags
@@ -369,7 +464,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 	if err != nil {
 		return h2ConnError{h2CompressionError}
 	}
-	if headerListSize(fields) > h.app.cfg.MaxHeaderListSize {
+	if headerListSize(fields) > maxH2HeaderListSize(h.app) {
 		h.sendRST(f.streamID, h2EnhanceYourCalm)
 		return nil
 	}
@@ -382,12 +477,12 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			return h2ConnError{h2ProtocolError}
 		}
 		h.lastStream = f.streamID
-		if h.draining.Load() || uint32(len(h.streams)) >= h.app.cfg.MaxConcurrentStreams {
+		if h.draining.Load() || uint32(len(h.streams)) >= maxH2ConcurrentStreams(h.app) {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2RefusedStream)
 			return nil
 		}
-		streamCtx, cancel := context.WithCancel(context.Background())
+		streamCtx, cancel := h.newStreamContext()
 		s = &h2Stream{id: f.streamID, sendWindow: h.peerInitialWindow, recvWindow: h2InitialWindow, ctx: streamCtx, cancel: cancel}
 		if err := validateRequestFields(s, fields); err != nil {
 			h.mu.Unlock()
@@ -401,9 +496,13 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
 		}
-		for _, field := range fields {
-			s.trailers = append(s.trailers, Header{Key: []byte(field.Name), Value: []byte(field.Value)})
+		trailers, err := validateRequestTrailers(fields)
+		if err != nil {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2ProtocolError)
+			return nil
 		}
+		s.trailers = append(s.trailers, trailers...)
 	}
 	end := f.flags&h2FlagEndStream != 0
 	if end {
@@ -471,7 +570,7 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		h.sendRST(f.streamID, h2StreamClosed)
 		return nil
 	}
-	if len(s.body)+len(p) > h.app.cfg.MaxRequestBodySize {
+	if len(s.body)+len(p) > maxH2RequestBodySize(h.app) {
 		h.mu.Unlock()
 		h.sendRST(f.streamID, h2Cancel)
 		return nil
@@ -546,7 +645,16 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 	}
 	s.dispatched = true
 	h.mu.Unlock()
+
+	select {
+	case h.streamSem <- struct{}{}:
+	default:
+		h.sendRST(s.id, h2RefusedStream)
+		return
+	}
+
 	go func() {
+		defer func() { <-h.streamSem }()
 		ctx := acquireCtx(h.conn, h.app)
 		ctx.h2 = &h2Response{conn: h, stream: s}
 		ctx.Header.Method = []byte(s.method)
@@ -667,6 +775,27 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 	return nil
 }
 
+func validateRequestTrailers(fields []hpack.HeaderField) ([]Header, error) {
+	trailers := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		if f.Name == "" || strings.HasPrefix(f.Name, ":") {
+			return nil, errors.New("invalid trailer name")
+		}
+		if strings.ToLower(f.Name) != f.Name || !validToken([]byte(f.Name)) {
+			return nil, errors.New("invalid trailer name")
+		}
+		if strings.ContainsAny(f.Value, "\x00\r\n") {
+			return nil, errors.New("invalid trailer value")
+		}
+		switch f.Name {
+		case "connection", "proxy-connection", "keep-alive", "upgrade", "transfer-encoding", "host", "content-length", "te":
+			return nil, errors.New("forbidden trailer")
+		}
+		trailers = append(trailers, Header{Key: []byte(f.Name), Value: []byte(f.Value)})
+	}
+	return trailers, nil
+}
+
 func validH2ContentLength(s *h2Stream) bool {
 	return !s.hasContentLength || s.contentLength == len(s.body)
 }
@@ -686,6 +815,48 @@ func headerListSize(fields []hpack.HeaderField) int {
 		n += len(f.Name) + len(f.Value) + 32
 	}
 	return n
+}
+
+func validResponseField(name string, value []byte) bool {
+	if name == "" || strings.HasPrefix(name, ":") {
+		return false
+	}
+	if strings.ToLower(name) != name || !validToken([]byte(name)) {
+		return false
+	}
+	return !bytes.ContainsAny(value, "\x00\r\n")
+}
+
+func forbiddenH2ResponseHeader(name string) bool {
+	switch name {
+	case "connection", "proxy-connection", "keep-alive", "upgrade", "transfer-encoding":
+		return true
+	default:
+		return false
+	}
+}
+
+func forbiddenH2Trailer(name string) bool {
+	switch name {
+	case "connection", "proxy-connection", "keep-alive", "upgrade", "transfer-encoding", "content-length", "host", "te", "trailer":
+		return true
+	default:
+		return false
+	}
+}
+
+func lowerHeaderName(b []byte) string {
+	needsLower := false
+	for _, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			needsLower = true
+			break
+		}
+	}
+	if !needsLower {
+		return string(b)
+	}
+	return strings.ToLower(string(b))
 }
 
 func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
@@ -806,15 +977,15 @@ func (h *h2Conn) sendResponseHeaders(s *h2Stream, c *Ctx, contentLength *int, en
 		fields = append(fields, hpack.HeaderField{Name: "content-length", Value: strconv.Itoa(*contentLength)})
 	}
 	for i := 0; i < c.chCount; i++ {
-		name := strings.ToLower(string(c.customHeaders[i].Key))
-		if name == "connection" || name == "transfer-encoding" || name == "upgrade" || name == "keep-alive" {
+		name := lowerHeaderName(c.customHeaders[i].Key)
+		if forbiddenH2ResponseHeader(name) || !validResponseField(name, c.customHeaders[i].Value) {
 			continue
 		}
 		fields = append(fields, hpack.HeaderField{Name: name, Value: string(c.customHeaders[i].Value)})
 	}
 	for i := range c.extraHeaders {
-		name := strings.ToLower(string(c.extraHeaders[i].Key))
-		if name == "connection" || name == "transfer-encoding" || name == "upgrade" || name == "keep-alive" {
+		name := lowerHeaderName(c.extraHeaders[i].Key)
+		if forbiddenH2ResponseHeader(name) || !validResponseField(name, c.extraHeaders[i].Value) {
 			continue
 		}
 		fields = append(fields, hpack.HeaderField{Name: name, Value: string(c.extraHeaders[i].Value)})
@@ -864,8 +1035,8 @@ func (h *h2Conn) sendTrailers(s *h2Stream, trailers []Header) error {
 	defer h.writeMu.Unlock()
 	h.encBuf.Reset()
 	for _, t := range trailers {
-		name := strings.ToLower(string(t.Key))
-		if name == "trailer" || strings.HasPrefix(name, ":") {
+		name := lowerHeaderName(t.Key)
+		if forbiddenH2Trailer(name) || !validResponseField(name, t.Value) {
 			continue
 		}
 		if err := h.enc.WriteField(hpack.HeaderField{Name: name, Value: string(t.Value)}); err != nil {
@@ -882,24 +1053,35 @@ func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 	}
 	for len(data) > 0 {
 		h.flowMu.Lock()
-		deadline := time.Now().Add(h.app.cfg.WriteTimeout)
-		for !h.closed.Load() && (h.connSendWindow <= 0 || s.sendWindow <= 0) {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				h.flowMu.Unlock()
-				return os.ErrDeadlineExceeded
+		var deadline time.Time
+		if h.app.cfg.WriteTimeout > 0 {
+			deadline = time.Now().Add(h.app.cfg.WriteTimeout)
+		}
+		for !h.closed.Load() && !s.reset.Load() && (h.connSendWindow <= 0 || s.sendWindow <= 0) {
+			if h.app.cfg.WriteTimeout > 0 {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					h.flowMu.Unlock()
+					return os.ErrDeadlineExceeded
+				}
+				timer := time.AfterFunc(remaining, func() {
+					h.flowMu.Lock()
+					h.flowCond.Broadcast()
+					h.flowMu.Unlock()
+				})
+				h.flowCond.Wait()
+				timer.Stop()
+			} else {
+				h.flowCond.Wait()
 			}
-			timer := time.AfterFunc(remaining, func() { h.flowMu.Lock(); h.flowCond.Broadcast(); h.flowMu.Unlock() })
-			h.flowCond.Wait()
-			timer.Stop()
 		}
 		if h.closed.Load() || s.reset.Load() {
 			h.flowMu.Unlock()
 			return net.ErrClosed
 		}
 		n := int64(len(data))
-		if n > int64(h.peerMaxFrame.Load()) {
-			n = int64(h.peerMaxFrame.Load())
+		if maxFrame := int64(h.peerMaxFrame.Load()); n > maxFrame {
+			n = maxFrame
 		}
 		if n > h.connSendWindow {
 			n = h.connSendWindow
@@ -907,29 +1089,35 @@ func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 		if n > s.sendWindow {
 			n = s.sendWindow
 		}
+		if n <= 0 {
+			h.flowMu.Unlock()
+			continue
+		}
 		h.connSendWindow -= n
 		s.sendWindow -= n
 		h.flowMu.Unlock()
+
 		flags := uint8(0)
 		if int(n) == len(data) && end {
 			flags = h2FlagEndStream
 		}
-		if err := h.writeFrame(h2Data, flags, s.id, data[:n]); err != nil {
+		if err := h.writeFrame(h2Data, flags, s.id, data[:int(n)]); err != nil {
 			return err
 		}
-		data = data[n:]
+		data = data[int(n):]
 	}
 	return nil
 }
 
 func (h *h2Conn) sendSettings() error {
+	h.settingsAwaitingAck.Store(true)
 	var p [18]byte
 	binary.BigEndian.PutUint16(p[0:2], 2)
 	binary.BigEndian.PutUint32(p[2:6], 0)
 	binary.BigEndian.PutUint16(p[6:8], 3)
-	binary.BigEndian.PutUint32(p[8:12], h.app.cfg.MaxConcurrentStreams)
+	binary.BigEndian.PutUint32(p[8:12], maxH2ConcurrentStreams(h.app))
 	binary.BigEndian.PutUint16(p[12:14], 6)
-	binary.BigEndian.PutUint32(p[14:18], uint32(h.app.cfg.MaxHeaderListSize))
+	binary.BigEndian.PutUint32(p[14:18], uint32(maxH2HeaderListSize(h.app)))
 	return h.writeFrame(h2Settings, 0, 0, p[:])
 }
 
@@ -940,6 +1128,9 @@ func (h *h2Conn) writeFrame(typ, flags uint8, streamID uint32, payload []byte) e
 }
 
 func (h *h2Conn) writeFrameLocked(typ, flags uint8, streamID uint32, payload []byte) error {
+	if h.closed.Load() {
+		return net.ErrClosed
+	}
 	if timeout := h.app.cfg.WriteTimeout; timeout > 0 {
 		_ = h.conn.SetWriteDeadline(time.Now().Add(timeout))
 	}
