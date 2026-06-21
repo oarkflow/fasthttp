@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
-	"github.com/oarkflow/fh/mw/authorizer"
+	"github.com/oarkflow/fh/contrib/mw/authorizer"
 	"github.com/oarkflow/tcpguard"
 	"github.com/oarkflow/tcpguard/bcl"
 	_ "modernc.org/sqlite"

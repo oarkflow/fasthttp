@@ -13,7 +13,7 @@ import (
 
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/fh"
-	middleware "github.com/oarkflow/fh/mw/authz"
+	middleware "github.com/oarkflow/fh/contrib/mw/authz"
 )
 
 func main() {
