@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PKG="${PKG:-./...}"
+FUZZ_PKG="${FUZZ_PKG:-.}"
 TARGET_URL="${TARGET_URL:-https://127.0.0.1:8443/}"
 H2SPEC_HOST="${H2SPEC_HOST:-127.0.0.1}"
 H2SPEC_PORT="${H2SPEC_PORT:-8443}"
@@ -19,10 +20,10 @@ echo "== benchmarks =="
 go test "$PKG" -run '^$' -bench 'BenchmarkH2' -benchmem -count=3
 
 echo "== fuzz smoke tests =="
-go test "$PKG" -run '^$' -fuzz FuzzH2HeaderFragment -fuzztime=10s
-go test "$PKG" -run '^$' -fuzz FuzzH2ReadFrame -fuzztime=10s
-go test "$PKG" -run '^$' -fuzz FuzzH2ValidateRequestFields -fuzztime=10s
-go test "$PKG" -run '^$' -fuzz FuzzH2ValidateRequestTrailers -fuzztime=10s
+go test "$FUZZ_PKG" -run '^$' -fuzz FuzzH2HeaderFragment -fuzztime=10s
+go test "$FUZZ_PKG" -run '^$' -fuzz FuzzH2ReadFrame -fuzztime=10s
+go test "$FUZZ_PKG" -run '^$' -fuzz FuzzH2ValidateRequestFields -fuzztime=10s
+go test "$FUZZ_PKG" -run '^$' -fuzz FuzzH2ValidateRequestTrailers -fuzztime=10s
 
 if command -v h2spec >/dev/null 2>&1; then
   echo "== h2spec =="

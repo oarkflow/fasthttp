@@ -62,7 +62,7 @@ func TestH2RaceConcurrentFrameHandling(t *testing.T) {
 			defer wg.Done()
 			_ = h.handleFrame(h2Frame{typ: 99, streamID: uint32(i)})
 			_ = h.handleFrame(h2Frame{typ: h2GoAway, streamID: 0, payload: make([]byte, 8)})
-		} (i)
+		}(i)
 	}
 	wg.Wait()
 }

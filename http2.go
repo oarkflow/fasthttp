@@ -64,6 +64,9 @@ type h2Conn struct {
 	app  *App
 	conn net.Conn
 	r    io.Reader
+	// frameBuf is reused by the connection read loop. Frame payloads are consumed
+	// synchronously, so retaining one buffer avoids an allocation for every frame.
+	frameBuf []byte
 
 	writeMu sync.Mutex
 	encBuf  bytes.Buffer
@@ -300,11 +303,16 @@ func (h *h2Conn) readFrame() (h2Frame, error) {
 		return h2Frame{}, h2ConnError{h2ProtocolError}
 	}
 
+	if cap(h.frameBuf) < length {
+		h.frameBuf = make([]byte, length)
+	} else {
+		h.frameBuf = h.frameBuf[:length]
+	}
 	f := h2Frame{
 		typ:      head[3],
 		flags:    head[4],
 		streamID: streamID & 0x7fffffff,
-		payload:  make([]byte, length),
+		payload:  h.frameBuf,
 	}
 	if length > 0 {
 		if _, err := io.ReadFull(h.r, f.payload); err != nil {
@@ -691,17 +699,31 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 
 func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 	pseudoDone := false
-	seen := make(map[string]bool, 4)
+	var seenPseudo uint8
+	seenHost := false
 	cookies := ""
 	for _, f := range fields {
 		if f.Name == "" || strings.ToLower(f.Name) != f.Name || strings.ContainsAny(f.Value, "\x00\r\n") {
 			return errors.New("uppercase header")
 		}
 		if strings.HasPrefix(f.Name, ":") {
-			if pseudoDone || seen[f.Name] {
+			var bit uint8
+			switch f.Name {
+			case ":method":
+				bit = 1 << 0
+			case ":path":
+				bit = 1 << 1
+			case ":authority":
+				bit = 1 << 2
+			case ":scheme":
+				bit = 1 << 3
+			default:
+				return errors.New("unknown pseudo header")
+			}
+			if pseudoDone || seenPseudo&bit != 0 {
 				return errors.New("invalid pseudo header")
 			}
-			seen[f.Name] = true
+			seenPseudo |= bit
 			switch f.Name {
 			case ":method":
 				s.method = f.Value
@@ -711,8 +733,6 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 				s.authority = f.Value
 			case ":scheme":
 				s.scheme = f.Value
-			default:
-				return errors.New("unknown pseudo header")
 			}
 			continue
 		}
@@ -734,10 +754,10 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 			}
 			s.hasContentLength, s.contentLength = true, n
 		case "host":
-			if seen["host"] {
+			if seenHost {
 				return errors.New("duplicate host")
 			}
-			seen["host"] = true
+			seenHost = true
 			if s.authority == "" {
 				s.authority = f.Value
 			} else if s.authority != f.Value {

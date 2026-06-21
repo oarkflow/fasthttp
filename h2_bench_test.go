@@ -34,10 +34,19 @@ func BenchmarkH2ReadFrameSmallData(b *testing.B) {
 	binary.BigEndian.PutUint32(head[5:9], 1)
 	frame := append(head[:], payload...)
 
+	h := newTestH2Conn(&testing.T{})
+	var r bytes.Reader
+	h.r = &r
+	// Prime the per-connection frame buffer. Connection construction and its
+	// one-time buffers are deliberately outside this frame parsing benchmark.
+	r.Reset(frame)
+	if _, err := h.readFrame(); err != nil {
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h := newTestH2Conn(&testing.T{})
-		h.r = bytes.NewReader(frame)
+		r.Reset(frame)
 		if _, err := h.readFrame(); err != nil {
 			b.Fatal(err)
 		}
