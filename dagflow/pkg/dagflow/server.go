@@ -152,13 +152,27 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config) {
 }
 
 func listTasks(engine *Engine) fh.HandlerFunc {
-	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.Store().List()) }
+	return func(c *fh.Ctx) error {
+		tasks := engine.Store().List()
+		out := make([]TaskActivitySummary, 0, len(tasks))
+		for _, t := range tasks {
+			out = append(out, taskActivitySummary(t))
+		}
+		return writeJSON(c, fh.StatusOK, out)
+	}
 }
 func listDLQ(engine *Engine) fh.HandlerFunc {
 	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.Store().ListDLQ()) }
 }
 func listChains(engine *Engine) fh.HandlerFunc {
-	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.ChainStore().List()) }
+	return func(c *fh.Ctx) error {
+		runs := engine.ChainStore().List()
+		out := make([]PublicChainState, 0, len(runs))
+		for _, r := range runs {
+			out = append(out, publicChainState(r))
+		}
+		return writeJSON(c, fh.StatusOK, out)
+	}
 }
 
 func chainGet(engine *Engine) fh.HandlerFunc {
@@ -167,7 +181,7 @@ func chainGet(engine *Engine) fh.HandlerFunc {
 		if err != nil {
 			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
 		}
-		return writeJSON(c, fh.StatusOK, run)
+		return writeJSON(c, fh.StatusOK, publicChainState(run))
 	}
 }
 
@@ -177,7 +191,7 @@ func taskGet(engine *Engine) fh.HandlerFunc {
 		if err != nil {
 			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
 		}
-		return writeJSON(c, fh.StatusOK, t)
+		return writeJSON(c, fh.StatusOK, publicTaskState(t))
 	}
 }
 
@@ -192,24 +206,36 @@ func taskOps(engine *Engine) fh.HandlerFunc {
 			}
 			c.Type("image/svg+xml")
 			return c.SendString(svg)
-		case "audit":
+		case "activities", "audit":
 			t, err := engine.Store().Get(id)
 			if err != nil {
 				return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
 			}
 			return writeJSON(c, fh.StatusOK, t.Audit)
+		case "summary":
+			t, err := engine.Store().Get(id)
+			if err != nil {
+				return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, taskActivitySummary(t))
+		case "debug":
+			t, err := engine.Store().Get(id)
+			if err != nil {
+				return writeJSON(c, fh.StatusNotFound, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, t)
 		case "pause":
 			t, err := engine.PauseTask(id)
 			if err != nil {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusOK, t)
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		case "cancel":
 			t, err := engine.CancelTask(id)
 			if err != nil {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusOK, t)
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		case "resume":
 			var input any
 			_ = json.Unmarshal(c.Body(), &input)
@@ -217,7 +243,7 @@ func taskOps(engine *Engine) fh.HandlerFunc {
 			if err != nil {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusOK, t)
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		case "continue":
 			var body struct {
 				Strategy ErrorStrategy `json:"strategy"`
@@ -228,13 +254,13 @@ func taskOps(engine *Engine) fh.HandlerFunc {
 			if err != nil {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusOK, t)
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		case "restart":
 			t, err := engine.RestartTask(c.Context(), id)
 			if err != nil {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusOK, t)
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		default:
 			return writeJSON(c, fh.StatusNotFound, map[string]any{"error": "unknown operation"})
 		}
@@ -252,13 +278,13 @@ func legacyWorkflowHandler(engine *Engine, async bool) fh.HandlerFunc {
 			if err != nil {
 				return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusAccepted, task)
+			return writeJSON(c, fh.StatusAccepted, publicTaskReceipt(task))
 		}
 		task, err := engine.RunSync(c.Context(), c.Param("workflow"), input)
 		if err != nil {
 			return writeJSON(c, fh.StatusInternalServerError, taskOrError(task, err))
 		}
-		return writeJSON(c, fh.StatusOK, task)
+		return writeJSON(c, fh.StatusOK, publicTaskResult(task))
 	}
 }
 
@@ -270,9 +296,9 @@ func legacyNodeHandler(engine *Engine) fh.HandlerFunc {
 		}
 		state, result, err := engine.RunStandaloneNode(c.Context(), c.Param("workflow"), c.Param("node"), input)
 		if err != nil {
-			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"state": state, "error": err.Error()})
+			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error(), "node": state.NodeID, "status": state.Status})
 		}
-		return writeJSON(c, fh.StatusOK, map[string]any{"state": state, "result": result})
+		return writeJSON(c, fh.StatusOK, publicResult(result))
 	}
 }
 

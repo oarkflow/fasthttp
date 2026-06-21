@@ -165,7 +165,11 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 	if err != nil {
 		return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
-	input, err = a.engine.applyData(c.Context(), buildDataSpec(rc.Data), &DataContext{Route: &rc, Input: input, Result: input, Request: requestData(c, params, input)}, input)
+	inputSpec := buildDataSpec(rc.Data)
+	if !inputSpec.Empty() && inputSpec.Source == "" {
+		inputSpec.Source = "request"
+	}
+	input, err = a.engine.applyData(c.Context(), inputSpec, &DataContext{Route: &rc, Input: input, Result: input, Request: requestData(c, params, input)}, input)
 	if err != nil {
 		if errors.Is(err, ErrDataFiltered) {
 			return writeJSON(c, fh.StatusUnprocessableEntity, map[string]any{"error": "request filtered by route data policy"})
@@ -181,7 +185,7 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			if existing, ok, err := a.engine.handleIdempotency(ctx, key, rc.Workflow, input); err != nil {
 				return writeJSON(c, fh.StatusConflict, map[string]any{"error": err.Error()})
 			} else if ok {
-				return writeJSON(c, fh.StatusOK, existing)
+				return a.writeRouteResult(c, fh.StatusOK, rc, params, input, existing.Result)
 			}
 		}
 		if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
@@ -190,7 +194,7 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			if err != nil {
 				return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusAccepted, task)
+			return writeJSON(c, fh.StatusAccepted, publicTaskReceipt(task))
 		}
 		task, err := a.engine.RunSync(ctx, rc.Workflow, input)
 		a.engine.recordIdempotencyFromRequest(c, rc.Workflow, input, task)
@@ -198,9 +202,9 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			return writeJSON(c, fh.StatusInternalServerError, taskOrError(task, err))
 		}
 		if task.Status == TaskWaiting || task.Status == TaskPaused {
-			return writeJSON(c, fh.StatusAccepted, task)
+			return writeJSON(c, fh.StatusAccepted, publicTaskState(task))
 		}
-		return writeJSON(c, fh.StatusOK, task)
+		return a.writeRouteResult(c, fh.StatusOK, rc, params, input, task.Result)
 	}
 	if rc.Chain != "" {
 		if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
@@ -208,13 +212,13 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			if err != nil {
 				return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 			}
-			return writeJSON(c, fh.StatusAccepted, run)
+			return writeJSON(c, fh.StatusAccepted, publicChainReceipt(run))
 		}
 		run, err := a.engine.RunChainSync(ctx, rc.Chain, input)
 		if err != nil {
 			return writeJSON(c, fh.StatusInternalServerError, chainOrError(run, err))
 		}
-		return writeJSON(c, fh.StatusOK, run)
+		return a.writeRouteResult(c, fh.StatusOK, rc, params, input, run.Result)
 	}
 	if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
 		run := newChainRun("adhoc", rc.Workflows, input)
@@ -238,13 +242,55 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			}
 			a.engine.finishChain(run, runErr)
 		}()
-		return writeJSON(c, fh.StatusAccepted, run)
+		return writeJSON(c, fh.StatusAccepted, publicChainReceipt(run))
 	}
 	run, err := a.engine.RunWorkflowIDsSync(ctx, rc.Workflows, input)
 	if err != nil {
 		return writeJSON(c, fh.StatusInternalServerError, chainOrError(run, err))
 	}
-	return writeJSON(c, fh.StatusOK, run)
+	return a.writeRouteResult(c, fh.StatusOK, rc, params, input, run.Result)
+}
+
+func (a *HTTPApp) writeRouteResult(c *fh.Ctx, status int, rc RouteConfig, params map[string]string, requestInput any, result any) error {
+	response := publicResult(result)
+	responseCfg := rc.Response
+	spec := buildDataSpec(responseCfg.Data)
+	if spec.Empty() {
+		spec = buildDataSpec(rc.ResponseData) // backwards-compatible legacy block
+	}
+	if !spec.Empty() {
+		if spec.Source == "" {
+			spec.Source = "result"
+		}
+		var err error
+		response, err = a.engine.applyData(c.Context(), spec, &DataContext{Route: &rc, Input: requestInput, Result: response, Request: requestData(c, params, requestInput)}, response)
+		if err != nil {
+			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "route response policy failed", "detail": err.Error()})
+		}
+		response = publicResult(response)
+	}
+	if err := a.engine.ValidateAgainstSchema(rc.OutputSchema, response); err != nil {
+		return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "response schema validation failed", "detail": err.Error()})
+	}
+	responseHeaders := map[string]string{}
+	for k, v := range responseCfg.Header {
+		responseHeaders[k] = v
+	}
+	for k, v := range responseCfg.Headers {
+		responseHeaders[k] = v
+	}
+	for header, expr := range responseHeaders {
+		headerName := strings.ReplaceAll(header, "_", "-")
+		value, err := a.engine.resolveDataValue(c.Context(), &DataContext{Route: &rc, Input: requestInput, Result: response, Request: requestData(c, params, requestInput)}, expr)
+		if err != nil {
+			value = expr
+		}
+		c.Set(headerName, fmt.Sprint(value))
+	}
+	if responseCfg.Status > 0 {
+		status = responseCfg.Status
+	}
+	return writeJSON(c, status, publicPayload(response))
 }
 
 func parsePath(path string) []pathSegment {
@@ -519,13 +565,21 @@ func (r *rateLimiter) allow(key string) bool {
 
 func taskOrError(task *Task, err error) any {
 	if task != nil {
-		return task
+		state := publicTaskState(task)
+		if err != nil && state.Error == "" {
+			state.Error = err.Error()
+		}
+		return state
 	}
 	return map[string]any{"error": err.Error()}
 }
 func chainOrError(run *ChainRun, err error) any {
 	if run != nil {
-		return run
+		state := publicChainState(run)
+		if err != nil && state.Error == "" {
+			state.Error = err.Error()
+		}
+		return state
 	}
 	return map[string]any{"error": err.Error()}
 }

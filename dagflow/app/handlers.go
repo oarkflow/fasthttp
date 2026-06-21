@@ -138,8 +138,6 @@ func RegisterExampleHandlers(e *dagflow.Engine) {
 			"task_id":       rc.TaskID,
 			"node_id":       rc.NodeID,
 			"previous_node": rc.PreviousNode,
-			"node_results":  rc.NodeResults,
-			"data_context":  rc.DataContext,
 		}, nil
 	})
 	e.Register("receive_batch", func(rc *dagflow.ExecutionContext, input any) (any, error) { xs, err := toSlice(input); return xs, err })
@@ -149,7 +147,7 @@ func RegisterExampleHandlers(e *dagflow.Engine) {
 	})
 	e.Register("finalize_batch", func(rc *dagflow.ExecutionContext, input any) (any, error) {
 		xs, _ := toSlice(input)
-		return map[string]any{"items": input, "count": len(xs), "previous_results": rc.NodeResults}, nil
+		return map[string]any{"items": input, "count": len(xs)}, nil
 	})
 	e.Register("approval_result", func(rc *dagflow.ExecutionContext, input any) (any, error) {
 		return map[string]any{"approved_payload": input, "approved_at": time.Now()}, nil

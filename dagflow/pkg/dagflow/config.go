@@ -191,22 +191,31 @@ type ChainConfig struct {
 	Condition string   `bcl:"condition,omitempty"`
 }
 
+type ResponseConfig struct {
+	Status  int               `bcl:"status,omitempty" json:"status,omitempty"`
+	Header  map[string]string `bcl:"header,omitempty" json:"header,omitempty"`
+	Headers map[string]string `bcl:"headers,omitempty" json:"headers,omitempty"`
+	Data    DataConfig        `bcl:"data,block,omitempty" json:"data,omitempty"`
+}
+
 type RouteConfig struct {
-	ID           string     `bcl:",id" json:"id"`
-	Method       string     `bcl:"method" json:"method"`
-	Path         string     `bcl:"path" json:"path"`
-	Workflow     string     `bcl:"workflow,omitempty" json:"workflow,omitempty"`
-	Chain        string     `bcl:"chain,omitempty" json:"chain,omitempty"`
-	Workflows    []string   `bcl:"workflows,omitempty" json:"workflows,omitempty"`
-	Mode         RouteMode  `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
-	Middlewares  []string   `bcl:"middlewares,omitempty" json:"middlewares,omitempty"`
-	Envelope     bool       `bcl:"envelope,omitempty" json:"envelope,omitempty"`
-	When         string     `bcl:"when,omitempty" json:"when,omitempty"`
-	Condition    string     `bcl:"condition,omitempty" json:"condition,omitempty"`
-	InputSchema  string     `bcl:"input_schema,omitempty" json:"input_schema,omitempty"`
-	OutputSchema string     `bcl:"output_schema,omitempty" json:"output_schema,omitempty"`
-	Tags         []string   `bcl:"tags,omitempty" json:"tags,omitempty"`
-	Data         DataConfig `bcl:"data,block,omitempty" json:"data,omitempty"`
+	ID           string         `bcl:",id" json:"id"`
+	Method       string         `bcl:"method" json:"method"`
+	Path         string         `bcl:"path" json:"path"`
+	Workflow     string         `bcl:"workflow,omitempty" json:"workflow,omitempty"`
+	Chain        string         `bcl:"chain,omitempty" json:"chain,omitempty"`
+	Workflows    []string       `bcl:"workflows,omitempty" json:"workflows,omitempty"`
+	Mode         RouteMode      `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
+	Middlewares  []string       `bcl:"middlewares,omitempty" json:"middlewares,omitempty"`
+	Envelope     bool           `bcl:"envelope,omitempty" json:"envelope,omitempty"`
+	When         string         `bcl:"when,omitempty" json:"when,omitempty"`
+	Condition    string         `bcl:"condition,omitempty" json:"condition,omitempty"`
+	InputSchema  string         `bcl:"input_schema,omitempty" json:"input_schema,omitempty"`
+	OutputSchema string         `bcl:"output_schema,omitempty" json:"output_schema,omitempty"`
+	Tags         []string       `bcl:"tags,omitempty" json:"tags,omitempty"`
+	Data         DataConfig     `bcl:"data,block,omitempty" json:"data,omitempty"`
+	Response     ResponseConfig `bcl:"response,block,omitempty" json:"response,omitempty"`
+	ResponseData DataConfig     `bcl:"response_data,block,omitempty" json:"response_data,omitempty"`
 }
 
 type FailurePolicyConfig struct {

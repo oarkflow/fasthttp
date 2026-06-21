@@ -14,8 +14,8 @@ route_group "api" {
       envelope true
       input_schema "EmailRequest"
 
+      # source defaults to "request" for route request data blocks.
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -45,6 +45,13 @@ route_group "api" {
           expr `input.to != "" && input.subject != ""`
         }
       }
+
+      response {
+        header {
+          X_DAGFlow_Route "route.id"
+          X_DAGFlow_Workflow "route.workflow"
+        }
+      }
     }
 
     route "send_email_async" {
@@ -56,7 +63,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -79,7 +85,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -101,7 +106,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -123,7 +127,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -141,7 +144,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           to "body.to"
           subject "body.subject"
@@ -155,6 +157,16 @@ route_group "api" {
           field "subject"
           op prefix
           arg "[route] "
+        }
+      }
+
+      response {
+        header {
+          X_DAGFlow_Route "route.id"
+        }
+        # response data source defaults to "result" when this block exists.
+        data {
+          omit ["debug", "node_results", "data_context"]
         }
       }
     }
@@ -185,7 +197,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           order_id "path.order_id"
           customer_id "body.customer_id"
@@ -212,7 +223,6 @@ route_group "api" {
       envelope true
 
       data {
-        source "request"
         map {
           items "body.items"
           path "path.path"
@@ -239,13 +249,18 @@ route_group "ops_api" {
     envelope true
 
     data {
-      source "request"
       map {
         body "body"
         admin_ip "client_ip"
       }
       set {
         admin_proxy true
+      }
+    }
+
+    response {
+      header {
+        X_DAGFlow_Route "route.id"
       }
     }
   }

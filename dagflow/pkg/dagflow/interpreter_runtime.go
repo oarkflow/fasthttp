@@ -47,7 +47,10 @@ func interpreterObjectToAny(obj interpreter.Object) any {
 	text := obj.Inspect()
 	var v any
 	if err := json.Unmarshal([]byte(text), &v); err == nil {
-		return v
+		return normalizeJSONValue(v)
+	}
+	if v, ok := parseInspectValue(text); ok {
+		return normalizeJSONValue(v)
 	}
 	switch o := obj.(type) {
 	case *interpreter.String:

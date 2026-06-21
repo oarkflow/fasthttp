@@ -275,30 +275,42 @@ workflow "email_flow" {
     }
   }
 
-  edge "send_fanout" {
+  edge "send_to_store_valid" {
     from "send"
-    targets ["store_valid", "audit"]
-    type fanout
+    to "store_valid"
+    type simple
 
     data {
       source "result"
       set {
-        fanout_source "send"
+        response_path true
       }
     }
   }
 
-  edge "valid_join" {
-    sources ["store_valid", "audit"]
-    to "notify_success"
-    type fanin
-    strategy "all"
+  edge "send_to_audit" {
+    from "send"
+    to "audit"
+    type simple
 
     data {
       source "result"
-      flatten ["items"]
       set {
-        joined true
+        activity_path true
+      }
+    }
+  }
+
+  edge "store_valid_to_notify" {
+    from "store_valid"
+    to "notify_success"
+    type simple
+
+    data {
+      source "result"
+      set {
+        joined false
+        response_path true
       }
     }
   }

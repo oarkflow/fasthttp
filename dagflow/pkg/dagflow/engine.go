@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type Engine struct {
 	callbacks      []FinalCallback
 	local          *LocalQueue
 	broker         Broker
+	activityLog    chan AuditEvent
 }
 
 func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
@@ -38,7 +40,8 @@ func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
 	if broker == nil {
 		broker = NewMemoryBroker()
 	}
-	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, dataSources: map[string]DataSourceFunc{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker}
+	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, dataSources: map[string]DataSourceFunc{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker, activityLog: make(chan AuditEvent, 4096)}
+	e.startActivityLogger()
 	e.local = NewLocalQueue(e, 8)
 	e.runtime = NewScriptRuntime(e)
 	return e
@@ -783,11 +786,33 @@ func (e *Engine) recordNodeError(task *Task, node *Node, input any, err error) {
 	task.FailedInput = input
 	task.Errors = append(task.Errors, TaskError{NodeID: node.ID, Error: err.Error(), Input: input, At: time.Now()})
 }
+func (e *Engine) startActivityLogger() {
+	go func() {
+		for ev := range e.activityLog {
+			log.Printf("dagflow activity task=%s workflow=%s node=%s event=%s message=%q", ev.TaskID, ev.WorkflowID, ev.NodeID, ev.Event, ev.Message)
+		}
+	}()
+}
+
 func (e *Engine) audit(task *Task, event, message string, data map[string]any) {
 	if task == nil {
 		return
 	}
-	task.Audit = append(task.Audit, AuditEvent{ID: newID("audit"), TaskID: task.ID, WorkflowID: task.WorkflowID, NodeID: task.CurrentNode, Event: event, Message: message, Data: data, At: time.Now()})
+	var safe map[string]any
+	if data != nil {
+		if m, ok := Redact(data).(map[string]any); ok {
+			safe = m
+		} else {
+			safe = map[string]any{"data": Redact(data)}
+		}
+	}
+	ev := AuditEvent{ID: newID("audit"), TaskID: task.ID, WorkflowID: task.WorkflowID, NodeID: task.CurrentNode, Event: event, Message: message, Data: safe, At: time.Now()}
+	task.Audit = append(task.Audit, ev)
+	select {
+	case e.activityLog <- ev:
+	default:
+		// Never block workflow execution because an audit log sink is congested.
+	}
 }
 
 func (e *Engine) applyWorkflowInput(ctx context.Context, wf *Workflow, input any) (any, error) {

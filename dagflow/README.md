@@ -1574,7 +1574,7 @@ strict       fail when expected source paths are missing
 
 ### BCL examples
 
-Route-level request ETL:
+Route-level request ETL (route `data {}` defaults to source `request`, so `source "request"` may be omitted):
 
 ```hcl
 route "send_email_normalized" {
@@ -1585,7 +1585,6 @@ route "send_email_normalized" {
   envelope true
 
   data {
-    source "request"
     map {
       to      "body.to"
       subject "body.subject"
@@ -1704,7 +1703,7 @@ export KEY='X-API-Key: dev-secret'
 
 #### 1) Sync email workflow: route data mapping → workflow input transforms → branch → fanout/fanin
 
-This exercises route `data { source "request" ... }`, workflow `input_data`, node `input_data/output_data`, branch edge filters, fanout edge data, fanin edge data, service source, integration source, and environment source.
+This exercises route `data { ... }` with the default request source, workflow `input_data`, node `input_data/output_data`, branch edge filters, fanout edge data, fanin edge data, service source, integration source, and environment source.
 
 ```bash
 curl -s -X POST "$API/api/email/send" \
@@ -1718,7 +1717,7 @@ curl -s -X POST "$API/api/email/send" \
   }' | jq
 ```
 
-Expected: HTTP `200`; task status should be `completed`; node states should show `receive`, `validate`, `send`, `store_valid`, `audit`, and `notify_success`. The stored node inputs/results include normalized lowercase email, trimmed subject/body, tenant config, CRM data, and edge metadata.
+Expected: HTTP `200` with only the business JSON response object. It must not include `node_states`, `node_results`, `audit`, cursor, visits, or workflow execution internals. Use `/ops/tasks/<task_id>/debug` or `/ops/tasks/<task_id>/activities` for operational details.
 
 #### 2) Invalid email branch: route mapping → validation branch → invalid store → failure notification
 
@@ -1733,7 +1732,7 @@ curl -s -X POST "$API/api/email/send" \
   }' | jq
 ```
 
-Expected: HTTP `200`; `validate.valid` should be `false`; the branch should route to `store_invalid` and `notify_failure` without running `send`.
+Expected: HTTP `200` with a clean failure-notification business object. The invalid branch stores the rejected message and returns the response object only; internal validation/node logs remain available through ops activity endpoints.
 
 #### 3) Async email workflow with transformed request data
 
@@ -1748,7 +1747,7 @@ curl -s -X POST "$API/api/email/send/async" \
   }' | jq
 ```
 
-Expected: HTTP `202` with a task object. Use the returned `id` with the ops task endpoint.
+Expected: HTTP `202` with a small receipt containing `task_id`, `workflow_id`, `status`, `status_url`, and `audit_url`, not the full task internals. Use the returned `task_id` with the ops task endpoint.
 
 #### 4) Script enrichment route: route transform + script node input/output data
 
@@ -1763,7 +1762,7 @@ curl -s -X POST "$API/api/email/script-enrich?source=docs" \
   }' | jq
 ```
 
-Expected: subject is prefixed at the route, then prefixed again by the script; output includes `enriched_by`, `app_env`, and `tenant_config`.
+Expected: subject is prefixed at the route, then prefixed again by the script; output is a JSON object, not a string, and includes `enriched_by`, `app_env`, and `tenant_config`.
 
 #### 5) Chain route: one normalized payload through `email_flow` then `audit_flow`
 
@@ -1778,7 +1777,7 @@ curl -s -X POST "$API/api/email/send-and-audit?source=curl" \
   }' | jq
 ```
 
-Expected: chain result with two task entries: first email, then audit. The audit workflow adds service/env data using `input_data`.
+Expected: a clean final chain result object. The chain run and child task details are stored for operations but are not returned by the public API route.
 
 #### 6) Inline workflow reuse route: workflow node data mapping between sub-workflows
 
@@ -1793,7 +1792,7 @@ curl -s -X POST "$API/api/email/send-inline-reuse" \
   }' | jq
 ```
 
-Expected: one parent task whose workflow node runs `email_flow`, then maps its result into `audit_flow`.
+Expected: a clean final object from the parent workflow. The workflow-node execution details remain in the task activity/debug endpoints.
 
 #### 7) Data ETL demo: body + path params + query + headers + env + service + integration
 
@@ -1830,7 +1829,7 @@ curl -s -X POST "$API/api/orders/order_1001/check" \
   }' | jq
 ```
 
-Expected: `receive` normalizes route/body/header data, `check_inventory`, `check_payment`, and `check_fraud` run in parallel, and `approve` receives the joined result.
+Expected: a clean approval result object. `receive` normalizes route/body/header data, the three checks run in parallel, and `approve` receives the joined result; per-node details remain in `/ops/tasks/<task_id>/debug`.
 
 #### 9) Iterator data handling: list extraction from request envelope → per-item transform
 
@@ -1860,7 +1859,57 @@ Expected: HTTP `422` with `request filtered by route data policy` because the ro
 - Missing paths are ignored by default so existing workflows do not break.
 - `strict true` turns missing paths into errors.
 - A filter returning false produces `ErrDataFiltered`; routes return `422`, nodes are marked skipped, and edges simply do not emit a run item.
-- All transformed inputs/results are stored in normal task/node state, so operations remain visible through `/ops/tasks/:id`, audit logs, and graph/status APIs.
+- Public `/api/*` responses return only the route/workflow business result. Transformed inputs/results, node state, node results, retries, waits, and audit events are stored as operational activity data and exposed through `/ops/tasks/:id/debug`, `/ops/tasks/:id/activities`, `/ops/tasks/:id/summary`, and graph/status APIs.
+
+
+### Public response vs operational activity separation
+
+DAGFlow separates **business response data** from **workflow execution activity**:
+
+- Public BCL routes return the final business result as a JSON object or an array of objects. If a handler accidentally returns a scalar, null, or an interpreter-inspected object string, DAGFlow normalizes or wraps it before writing the HTTP response. They do not return `Task`, `NodeState`, `NodeResults`, `Audit`, cursor, visit counters, or internal workflow logs.
+- Async routes return a compact receipt containing `task_id`, `workflow_id`, `status`, `status_url`, and `audit_url`.
+- Operational activity is persisted on the task and logged through the background activity logger. Use ops endpoints for inspection:
+
+```bash
+curl -s -H 'X-Admin-Token: dev-admin' "$API/ops/tasks" | jq
+curl -s -H 'X-Admin-Token: dev-admin' "$API/ops/tasks/<task_id>" | jq
+curl -s -H 'X-Admin-Token: dev-admin' "$API/ops/tasks/<task_id>/summary" | jq
+curl -s -H 'X-Admin-Token: dev-admin' "$API/ops/tasks/<task_id>/activities" | jq
+curl -s -H 'X-Admin-Token: dev-admin' "$API/ops/tasks/<task_id>/debug" | jq
+```
+
+Route-level `response { ... }` can shape final API output and headers independently from route request mapping and workflow/node/edge data handling. Response `data {}` defaults to source `result`, so `source "result"` may be omitted:
+
+```bcl
+route "send_email" {
+  method "POST"
+  path "/send"
+  workflow "email_flow"
+  mode sync
+
+  data {
+    # source defaults to request
+    map {
+      to "body.to"
+      subject "body.subject"
+      body "body.body"
+    }
+  }
+
+  response {
+    status 200
+    header {
+      X_DAGFlow_Route "route.id"       # underscores are emitted as hyphens
+      X_DAGFlow_Workflow "route.workflow"
+    }
+    data {
+      omit ["debug", "node_results", "data_context"]
+    }
+  }
+}
+```
+
+The legacy `response_data { ... }` block is still accepted for backward compatibility, but new app BCL should use `response { data { ... } header { ... } }`. This keeps API responses stable while preserving full traceability for audit, support, replay, DLQ, debugging, and compliance.
 
 
 ### Runtime configuration validation fixes

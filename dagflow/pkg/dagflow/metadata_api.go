@@ -177,7 +177,7 @@ func dlqReplay(engine *Engine) fh.HandlerFunc {
 			return writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": err.Error()})
 		}
 		_ = engine.Store().DeleteDLQ(id)
-		return writeJSON(c, fh.StatusAccepted, task)
+		return writeJSON(c, fh.StatusAccepted, publicTaskReceipt(task))
 	}
 }
 func opsMetrics(engine *Engine) fh.HandlerFunc {
