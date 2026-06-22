@@ -60,8 +60,7 @@ func main() {
 		csrf.New(),
 		skip.Any(
 			skip.Health(),
-			skip.Paths("/cached", "/csrf-token"),
-			skip.SafeMethods(),
+			skip.Paths("/cached"),
 			skip.Preflight(),
 		),
 	))
