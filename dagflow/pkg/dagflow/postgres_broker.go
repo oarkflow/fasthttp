@@ -115,6 +115,29 @@ func (b *PostgresBroker) Ack(ctx context.Context, jobID string) error {
 func (b *PostgresBroker) Nack(ctx context.Context, jobID string, err error) error {
 	return b.store.NackJob(ctx, jobID, err, 2*time.Second, b.maxAttempts)
 }
+
+func (b *PostgresBroker) nackJob(ctx context.Context, job Job, err error) bool {
+	b.mu.RLock()
+	cfg := b.queues[job.Queue]
+	b.mu.RUnlock()
+	maxAttempts := queueMaxAttempts(job, cfg, b.maxAttempts)
+	terminal := job.Attempt >= maxAttempts
+	if delay := queueRetryDelay(job.Attempt); !terminal {
+		_ = b.store.NackJob(ctx, job.ID, err, delay, maxAttempts)
+		return false
+	}
+	_ = b.store.NackJob(ctx, job.ID, err, 0, maxAttempts)
+	if cfg.DLQ != "" {
+		dlq := job
+		dlq.ID = newID("job")
+		dlq.Queue = cfg.DLQ
+		dlq.Attempt = 1
+		dlq.CreatedAt = time.Now()
+		dlq.AvailableAt = time.Now()
+		_ = b.PublishToQueue(context.Background(), cfg.DLQ, dlq)
+	}
+	return true
+}
 func (b *PostgresBroker) Complete(ctx context.Context, r JobResult) error {
 	return b.store.CompleteJob(ctx, r)
 }
@@ -187,17 +210,20 @@ func (b *PostgresBroker) consumerLoop(ctx context.Context, id string, jobs <-cha
 			if !ok {
 				return
 			}
-			jr := handler(ctx, job)
+			jr := safeHandleJob(ctx, handler, job)
 			if jr.Queue == "" {
 				jr.Queue = job.Queue
 			}
 			if jr.Error != "" {
-				_ = b.Nack(ctx, job.ID, errors.New(jr.Error))
+				terminal := b.nackJob(ctx, job, errors.New(jr.Error))
 				b.bumpConsumer(id, false)
-			} else {
-				_ = b.Ack(ctx, job.ID)
-				b.bumpConsumer(id, true)
+				if terminal {
+					_ = b.Complete(ctx, jr)
+				}
+				continue
 			}
+			_ = b.Ack(ctx, job.ID)
+			b.bumpConsumer(id, true)
 			_ = b.Complete(ctx, jr)
 		case <-ctx.Done():
 			return

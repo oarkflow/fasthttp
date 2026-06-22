@@ -31,6 +31,9 @@ type Engine struct {
 	notifier        *NotificationDispatcher
 	queueConfigs    []QueueConfig
 	consumerConfigs []QueueConsumerConfig
+	runtimeCancel   context.CancelFunc
+	wg              sync.WaitGroup
+	taskLocks       sync.Map
 }
 
 func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
@@ -50,6 +53,17 @@ func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
 	return e
 }
 
+func (e *Engine) lockTask(taskID string) func() {
+	if taskID == "" {
+		return func() {}
+	}
+	v, _ := e.taskLocks.LoadOrStore(taskID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
 func (e *Engine) Register(name string, h Handler) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -138,14 +152,16 @@ func (e *Engine) LoadConfig(cfg *Config) error {
 }
 
 func (e *Engine) Start(ctx context.Context) error {
-	e.local.Start(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	e.runtimeCancel = cancel
+	e.local.Start(runCtx)
 	if mb, ok := e.broker.(ManagedBroker); ok {
 		for _, cc := range e.consumerConfigs {
 			if cc.ID == "" {
 				cc.ID = "workflow-consumer:" + cc.Queue + ":" + cc.Workflow
 			}
 			if cc.Workflow != "" {
-				if err := mb.StartConsumer(ctx, cc, e.executeJob); err != nil {
+				if err := mb.StartConsumer(runCtx, cc, e.executeJob); err != nil {
 					return err
 				}
 			}
@@ -160,7 +176,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	e.mu.RUnlock()
 	for _, id := range ids {
-		e.StartDistributedWorker(ctx, id, 4)
+		e.StartDistributedWorker(runCtx, id, 4)
 	}
 	return nil
 }
@@ -288,13 +304,14 @@ func (e *Engine) RunAsync(ctx context.Context, workflowID string, input any) (*T
 	if err := e.store.Create(task); err != nil {
 		return nil, err
 	}
-	go func() {
-		err := e.executeTask(context.Background(), wf, task, []RunItem{{NodeID: wf.First, Input: input}})
+	runCtx := context.WithoutCancel(ctx)
+	e.safeGo(func() {
+		err := e.executeTask(runCtx, wf, task, []RunItem{{NodeID: wf.First, Input: input}})
 		if err == nil && task.Status != TaskWaiting && task.Status != TaskPaused && task.Status != TaskCancelled {
-			task.Result, err = e.applyWorkflowOutput(context.Background(), wf, task, task.Result)
+			task.Result, err = e.applyWorkflowOutput(runCtx, wf, task, task.Result)
 		}
 		e.finishTask(task, err)
-	}()
+	})
 	return task, nil
 }
 
@@ -419,9 +436,6 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 		node := wf.Nodes[item.NodeID]
 		if node == nil {
 			return fmt.Errorf("node %s not found", item.NodeID)
-		}
-		if task.Visits == nil {
-			task.Visits = map[string]int{}
 		}
 		task.Visits[node.ID]++
 		if task.Visits[node.ID] > wf.MaxVisits {
@@ -878,10 +892,45 @@ func (e *Engine) recordNodeError(task *Task, node *Node, input any, err error) {
 }
 func (e *Engine) startActivityLogger() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("dagflow activity logger panic: %v", r)
+			}
+		}()
 		for ev := range e.activityLog {
 			log.Printf("dagflow activity task=%s workflow=%s node=%s event=%s message=%q", ev.TaskID, ev.WorkflowID, ev.NodeID, ev.Event, ev.Message)
 		}
 	}()
+}
+
+func (e *Engine) safeGo(fn func()) {
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("dagflow goroutine panic: %v", r)
+			}
+		}()
+		fn()
+	}()
+}
+
+func (e *Engine) Shutdown(ctx context.Context) error {
+	if e.runtimeCancel != nil {
+		e.runtimeCancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (e *Engine) audit(task *Task, event, message string, data map[string]any) {

@@ -385,7 +385,9 @@ func (e *Engine) dataFacts(dc *DataContext) map[string]any {
 	return facts
 }
 
-func evalBCLAny(expr string, facts map[string]any) (any, error) { return bcl.Eval(expr, facts) }
+func evalBCLAny(expr string, facts map[string]any) (any, error) {
+	return bcl.Eval(normalizeBCLExpr(expr), facts)
+}
 
 func cloneAny(v any) any {
 	b, err := json.Marshal(v)

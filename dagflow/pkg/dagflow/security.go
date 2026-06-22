@@ -17,6 +17,19 @@ func signingSecret() []byte {
 	}
 	return []byte(s)
 }
+
+func ValidateProductionSecurity() error {
+	if os.Getenv("DAGFLOW_ENV") != "production" {
+		return nil
+	}
+	if os.Getenv("DAGFLOW_SIGNING_SECRET") == "" || os.Getenv("DAGFLOW_SIGNING_SECRET") == "dev-change-me" {
+		return fmt.Errorf("DAGFLOW_SIGNING_SECRET must be set to a strong secret in production")
+	}
+	if os.Getenv("DAGFLOW_ADMIN_TOKEN") == "" {
+		return fmt.Errorf("DAGFLOW_ADMIN_TOKEN must be set in production")
+	}
+	return nil
+}
 func SignResumeToken(taskID, workflowID, nodeID string, ttl time.Duration) string {
 	exp := time.Now().Add(ttl).Unix()
 	nonce := newID("nonce")

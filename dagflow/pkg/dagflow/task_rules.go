@@ -127,6 +127,10 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 			e.audit(task, "task.cancelled_by_rule", firstNonEmpty(rule.Message, rule.Action.Reason, "task cancelled by rule"), map[string]any{"rule": rule.ID})
 			return ErrApprovalRequired
 		case ActionRequireApproval:
+			if e.approvalAlreadyApproved(task.ID, rule.ID, safeNodeID(node)) {
+				e.audit(task, "approval.already_approved", "approval already approved; continuing", map[string]any{"rule": rule.ID})
+				continue
+			}
 			if err := e.createApproval(ctx, wf, task, node, rule, payload); err != nil {
 				return err
 			}
@@ -138,6 +142,18 @@ func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, n
 	return nil
 }
 
+func (e *Engine) approvalAlreadyApproved(taskID, ruleID, nodeID string) bool {
+	as, ok := e.store.(ApprovalStore)
+	if !ok {
+		return false
+	}
+	for _, a := range as.ListApprovals("") {
+		if a.TaskID == taskID && a.RuleID == ruleID && a.NodeID == nodeID && a.Status == ApprovalApproved {
+			return true
+		}
+	}
+	return false
+}
 func collectTaskRules(wf *Workflow, node *Node) []TaskRule {
 	var out []TaskRule
 	if wf != nil {
@@ -222,6 +238,8 @@ func (e *Engine) bulkDecide(ctx context.Context, taskIDs []string, approver, rea
 }
 
 func (e *Engine) decideTaskApproval(ctx context.Context, taskID, approver, reason string, decision ApprovalStatus) (*Task, error) {
+	unlock := e.lockTask(taskID)
+	defer unlock()
 	as, ok := e.store.(ApprovalStore)
 	if !ok {
 		return nil, errors.New("approval store is not available")

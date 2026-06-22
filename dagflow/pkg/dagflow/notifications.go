@@ -384,7 +384,12 @@ func (e *Engine) emitConfiguredNotification(ctx context.Context, wf *Workflow, t
 		}
 		cp := msg
 		cp.ChannelID = channelID
-		e.deliverNotification(ctx, ch, cp)
+		if ch.Type == NotifyLog {
+			e.deliverNotification(ctx, ch, cp)
+		} else {
+			deliverCtx := context.WithoutCancel(ctx)
+			e.safeGo(func() { e.deliverNotification(deliverCtx, ch, cp) })
+		}
 	}
 }
 

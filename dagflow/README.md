@@ -2229,3 +2229,43 @@ curl -X POST 'http://localhost:8080/api/email/notification-approval-demo/queue?a
 With the default memory runtime, queue state is in-process and suitable for local development and tests. With `DAGFLOW_STORE=postgres`, jobs are stored in `dagflow_jobs` with queue name, status, attempts, visibility timestamp, lease owner, result, and error data. Postgres consumers claim jobs using `FOR UPDATE SKIP LOCKED`, heartbeat through the existing lease model, retry failed jobs, and recover expired running jobs back to retry state.
 
 Existing workflow features continue to work with queue-backed execution: notification rules, task filters, manual approvals, node stats, task audit logs, idempotency, distributed node execution, retries, DLQ recording, route data mapping, schemas, and response shaping.
+
+## Enterprise hardening update
+
+This build adds the next production-hardening layer without removing the previous workflow, notification, approval, queue, BCL, and ops features.
+
+### Queue and consumer fixes
+
+- Inline BCL expressions are normalized before evaluation, fixing failures such as `unexpected expression token "\\n"` for backtick/raw-string `when` rules.
+- Managed queue consumers now recover from handler panics and convert panics into failed job results instead of killing the consumer goroutine.
+- Queue retry behavior no longer prematurely completes awaited jobs on the first failed attempt. Failed jobs are retried with backoff until `max_attempts` is reached.
+- Memory and Postgres brokers now honor queue/job max-attempt selection consistently.
+- Terminally failed jobs can be copied into the configured DLQ queue.
+- Local background-node execution starts lazily when the engine is used without the HTTP server bootstrap.
+- Async workflows detach from the request cancellation context while still using engine panic recovery.
+
+### Security and operations
+
+- Production mode now refuses to start unless `DAGFLOW_SIGNING_SECRET` and `DAGFLOW_ADMIN_TOKEN` are configured.
+- Added health endpoints:
+  - `GET /health/live`
+  - `GET /health/ready`
+  - `GET /health/startup`
+- Non-log notification delivery runs outside the critical workflow path and is protected by engine panic recovery.
+- Approval resume is protected against repeatedly triggering the same `require_approval` rule after it has already been approved.
+
+### Queue example
+
+```bash
+curl -X POST 'http://localhost:8080/api/email/notification-approval-demo/queue?await=true' \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"user@example.com","subject":"hello","message":"queued email"}'
+```
+
+Consumer controls:
+
+```bash
+curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/pause
+curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/resume
+curl -X POST http://localhost:8080/ops/consumers/email_jobs_consumer/stop
+```

@@ -39,6 +39,8 @@ func (e *Engine) CancelTask(taskID string) (*Task, error) {
 }
 
 func (e *Engine) ResumeTask(ctx context.Context, taskID string, input any) (*Task, error) {
+	unlock := e.lockTask(taskID)
+	defer unlock()
 	task, err := e.store.Get(taskID)
 	if err != nil {
 		return nil, err
@@ -91,6 +93,8 @@ func (e *Engine) ResumeTask(ctx context.Context, taskID string, input any) (*Tas
 }
 
 func (e *Engine) ContinueTask(ctx context.Context, taskID string, strategy ErrorStrategy, result any) (*Task, error) {
+	unlock := e.lockTask(taskID)
+	defer unlock()
 	if strategy == "" {
 		strategy = ContinueSkip
 	}

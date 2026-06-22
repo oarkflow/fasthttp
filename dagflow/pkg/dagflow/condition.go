@@ -113,8 +113,27 @@ func (e *Engine) evalConditionSpec(spec ConditionSpec, facts map[string]any) (bo
 	return true, nil
 }
 
-func evalBCLBool(expr string, facts map[string]any) (bool, error) {
+func normalizeBCLExpr(expr string) string {
 	expr = strings.TrimSpace(expr)
+	for {
+		trimmed := strings.TrimSpace(expr)
+		if len(trimmed) >= 2 {
+			first, last := trimmed[0], trimmed[len(trimmed)-1]
+			if (first == '`' && last == '`') || (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+				expr = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+				continue
+			}
+		}
+		expr = trimmed
+		break
+	}
+	expr = strings.ReplaceAll(expr, "\r", " ")
+	expr = strings.ReplaceAll(expr, "\n", " ")
+	expr = strings.ReplaceAll(expr, "\t", " ")
+	return strings.TrimSpace(expr)
+}
+func evalBCLBool(expr string, facts map[string]any) (bool, error) {
+	expr = normalizeBCLExpr(expr)
 	if expr == "" {
 		return true, nil
 	}

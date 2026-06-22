@@ -513,7 +513,8 @@ func (s *PostgresStorage) ClaimJob(ctx context.Context, workflowID, workerID str
 	defer tx.Rollback()
 	var b []byte
 	var id string
-	err = tx.QueryRowContext(ctx, `SELECT id,data FROM dagflow_jobs WHERE queue=$1 AND status IN('queued','retry') AND visible_at<=now() ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, workflowID).Scan(&id, &b)
+	var attempts int
+	err = tx.QueryRowContext(ctx, `SELECT id,data,attempts FROM dagflow_jobs WHERE queue=$1 AND status IN('queued','retry') AND visible_at<=now() ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, workflowID).Scan(&id, &b, &attempts)
 	if err != nil {
 		return Job{}, err
 	}
@@ -527,6 +528,10 @@ func (s *PostgresStorage) ClaimJob(ctx context.Context, workflowID, workerID str
 	var j Job
 	if err = json.Unmarshal(b, &j); err != nil {
 		return Job{}, err
+	}
+	j.Attempt = attempts + 1
+	if j.ID == "" {
+		j.ID = id
 	}
 	return j, nil
 }

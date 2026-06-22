@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/oarkflow/fh"
 )
@@ -22,6 +23,9 @@ type ServerOptions struct {
 func DefaultBCLPath() string { return "app/bcl" }
 
 func RunServer(ctx context.Context, opt ServerOptions) error {
+	if err := ValidateProductionSecurity(); err != nil {
+		return err
+	}
 	bclPath := opt.BCLPath
 	if bclPath == "" {
 		bclPath = DefaultBCLPath()
@@ -125,6 +129,9 @@ func RunCLI(args []string, bclDefault string, register RegisterFunc) error {
 }
 
 func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...string) {
+	app.Get("/health/live", healthLive())
+	app.Get("/health/ready", healthReady(engine))
+	app.Get("/health/startup", healthReady(engine))
 	app.Get("/openapi.json", opsOpenAPI(cfg))
 	app.Get("/metrics", opsMetrics(engine))
 	app.Get("/ops/metadata", opsGuard(opsMetadata(engine, cfg)))
@@ -166,6 +173,24 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 	app.Post("/node/:workflow/:node", legacyNodeHandler(engine))
 }
 
+func healthLive() fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		return writeJSON(c, fh.StatusOK, map[string]any{"status": "ok", "time": time.Now()})
+	}
+}
+
+func healthReady(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		report := engine.Health(ctx)
+		status := fh.StatusOK
+		if report.Status != "ok" {
+			status = fh.StatusServiceUnavailable
+		}
+		return writeJSON(c, status, report)
+	}
+}
 func listTasks(engine *Engine) fh.HandlerFunc {
 	return func(c *fh.Ctx) error {
 		tasks := engine.Store().List()

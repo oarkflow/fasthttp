@@ -328,6 +328,11 @@ func (b *MemoryBroker) StartConsumer(ctx context.Context, cfg QueueConsumerConfi
 }
 
 func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan Job, handler QueueConsumerHandler) {
+	defer func() {
+		if r := recover(); r != nil {
+			b.bumpConsumer(id, false)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -352,18 +357,24 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 			}
 		}
 		select {
-		case job := <-jobs:
-			jr := handler(ctx, job)
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			jr := safeHandleJob(ctx, handler, job)
 			if jr.Queue == "" {
 				jr.Queue = job.Queue
 			}
 			if jr.Error != "" {
-				_ = b.Nack(ctx, job.ID, errors.New(jr.Error))
+				terminal := b.nackJob(ctx, job, errors.New(jr.Error))
 				b.bumpConsumer(id, false)
-			} else {
-				_ = b.Ack(ctx, job.ID)
-				b.bumpConsumer(id, true)
+				if terminal {
+					_ = b.Complete(ctx, jr)
+				}
+				continue
 			}
+			_ = b.Ack(ctx, job.ID)
+			b.bumpConsumer(id, true)
 			_ = b.Complete(ctx, jr)
 		case <-ctx.Done():
 			return
@@ -371,6 +382,96 @@ func (b *MemoryBroker) consumerLoop(ctx context.Context, id string, jobs <-chan 
 	}
 }
 
+func safeHandleJob(ctx context.Context, handler QueueConsumerHandler, job Job) (jr JobResult) {
+	started := time.Now()
+	jr = JobResult{JobID: job.ID, Queue: job.Queue, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, StartedAt: started}
+	defer func() {
+		if r := recover(); r != nil {
+			jr.Error = fmt.Sprintf("panic: %v", r)
+		}
+		if jr.FinishedAt.IsZero() {
+			jr.FinishedAt = time.Now()
+		}
+	}()
+	jr = handler(ctx, job)
+	if jr.JobID == "" {
+		jr.JobID = job.ID
+	}
+	if jr.StartedAt.IsZero() {
+		jr.StartedAt = started
+	}
+	return jr
+}
+
+func queueMaxAttempts(job Job, cfg QueueConfig, fallback int) int {
+	if job.MaxAttempts > 0 {
+		return job.MaxAttempts
+	}
+	if cfg.MaxAttempts > 0 {
+		return cfg.MaxAttempts
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	return 1
+}
+
+func queueRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := time.Duration(1<<min(attempt-1, 6)) * time.Second
+	jitter := time.Duration(attempt%7) * 137 * time.Millisecond
+	return d + jitter
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (b *MemoryBroker) nackJob(ctx context.Context, job Job, err error) bool {
+	b.mu.RLock()
+	q := b.queues[job.Queue]
+	cfg := QueueConfig{}
+	if q != nil {
+		cfg = q.cfg
+	}
+	b.mu.RUnlock()
+	maxAttempts := queueMaxAttempts(job, cfg, 1)
+	nextAttempt := job.Attempt + 1
+	if job.Attempt <= 0 {
+		nextAttempt = 2
+	}
+	if nextAttempt <= maxAttempts {
+		retry := job
+		retry.Attempt = nextAttempt
+		retry.AvailableAt = time.Now().Add(queueRetryDelay(job.Attempt))
+		go func() {
+			t := time.NewTimer(time.Until(retry.AvailableAt))
+			defer t.Stop()
+			select {
+			case <-t.C:
+				_ = b.PublishToQueue(context.Background(), retry.Queue, retry)
+			case <-ctx.Done():
+			}
+		}()
+		_ = b.Nack(ctx, job.ID, err)
+		return false
+	}
+	_ = b.Nack(ctx, job.ID, err)
+	if cfg.DLQ != "" {
+		dlq := job
+		dlq.ID = newID("job")
+		dlq.Queue = cfg.DLQ
+		dlq.Attempt = 1
+		dlq.CreatedAt = time.Now()
+		_ = b.PublishToQueue(context.Background(), cfg.DLQ, dlq)
+	}
+	return true
+}
 func (b *MemoryBroker) bumpConsumer(id string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -464,6 +565,7 @@ type LocalQueue struct {
 	engine  *Engine
 	workers int
 	jobs    chan localRequest
+	once    sync.Once
 }
 
 func NewLocalQueue(e *Engine, workers int) *LocalQueue {
@@ -473,24 +575,27 @@ func NewLocalQueue(e *Engine, workers int) *LocalQueue {
 	return &LocalQueue{engine: e, workers: workers, jobs: make(chan localRequest, 1024)}
 }
 func (q *LocalQueue) Start(ctx context.Context) {
-	for i := 0; i < q.workers; i++ {
-		go func() {
-			for {
-				select {
-				case req := <-q.jobs:
-					jr := q.engine.executeJob(ctx, req.job)
-					if req.result != nil {
-						req.result <- jr
-						close(req.result)
+	q.once.Do(func() {
+		for i := 0; i < q.workers; i++ {
+			go func() {
+				for {
+					select {
+					case req := <-q.jobs:
+						jr := q.engine.executeJob(ctx, req.job)
+						if req.result != nil {
+							req.result <- jr
+							close(req.result)
+						}
+					case <-ctx.Done():
+						return
 					}
-				case <-ctx.Done():
-					return
 				}
-			}
-		}()
-	}
+			}()
+		}
+	})
 }
 func (q *LocalQueue) SubmitAndWait(ctx context.Context, job Job) (JobResult, error) {
+	q.Start(context.Background())
 	ch := make(chan JobResult, 1)
 	select {
 	case q.jobs <- localRequest{job: job, result: ch}:
@@ -505,6 +610,7 @@ func (q *LocalQueue) SubmitAndWait(ctx context.Context, job Job) (JobResult, err
 	}
 }
 func (q *LocalQueue) SubmitFireAndForget(ctx context.Context, job Job) error {
+	q.Start(context.Background())
 	select {
 	case q.jobs <- localRequest{job: job}:
 		return nil
@@ -560,6 +666,8 @@ func (e *Engine) executeJob(ctx context.Context, job Job) JobResult {
 }
 
 func (e *Engine) executeWorkflowQueueJob(ctx context.Context, job Job) JobResult {
+	unlock := e.lockTask(job.TaskID)
+	defer unlock()
 	started := time.Now()
 	jr := JobResult{JobID: job.ID, Queue: job.Queue, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: QueueWorkflowNode, StartedAt: started}
 	task, err := e.store.Get(job.TaskID)
@@ -606,11 +714,14 @@ func (e *Engine) StartDistributedWorker(ctx context.Context, workflowID string, 
 		return
 	}
 	for i := 0; i < concurrency; i++ {
-		go func() {
+		e.safeGo(func() {
 			for {
 				select {
-				case job := <-jobs:
-					jr := e.executeJob(ctx, job)
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					jr := safeHandleJob(ctx, e.executeJob, job)
 					if jr.Error != "" {
 						_ = e.broker.Nack(ctx, job.ID, errors.New(jr.Error))
 					} else {
@@ -621,6 +732,6 @@ func (e *Engine) StartDistributedWorker(ctx context.Context, workflowID string, 
 					return
 				}
 			}
-		}()
+		})
 	}
 }
