@@ -80,6 +80,38 @@ type ApprovalStore interface {
 var ErrApprovalRequired = errors.New("approval required")
 var ErrTaskRejected = errors.New("task rejected")
 
+type PermanentError struct {
+	Err error
+}
+
+func (e PermanentError) Error() string {
+	if e.Err == nil {
+		return "permanent error"
+	}
+	return e.Err.Error()
+}
+
+func (e PermanentError) Unwrap() error { return e.Err }
+
+func NewPermanentError(format string, args ...any) error {
+	return PermanentError{Err: fmt.Errorf(format, args...)}
+}
+
+func IsPermanentError(err error) bool {
+	var pe PermanentError
+	return errors.As(err, &pe)
+}
+
+func isPermanentErrorText(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "invalid condition shape") ||
+		strings.Contains(s, "did not return a boolean") ||
+		strings.Contains(s, "condition must be a string expression") ||
+		strings.Contains(s, "condition ") && strings.Contains(s, " not found") ||
+		strings.Contains(s, "unsupported action") ||
+		strings.Contains(s, "schema") && strings.Contains(s, "not found")
+}
+
 func (e *Engine) applyTaskRules(ctx context.Context, wf *Workflow, task *Task, node *Node, event string, input any) error {
 	for _, rule := range collectTaskRules(wf, node) {
 		if !ruleEnabled(rule.Enabled) || !matchesEvent(rule.Events, event) {

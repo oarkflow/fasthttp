@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -458,14 +460,34 @@ func buildMiddleware(cfg MiddlewareConfig) (fh.HandlerFunc, error) {
 	}
 	switch cfg.Type {
 	case "recover":
-		return func(c *fh.Ctx) (err error) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					err = writeJSON(c, fh.StatusInternalServerError, map[string]any{"error": "panic recovered", "detail": fmt.Sprint(rec)})
+	return func(c *fh.Ctx) (err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				stack := string(debug.Stack())
+
+				log.Printf(
+					"dagflow http panic recovered path=%s method=%s panic=%v\n%s",
+					string(c.Path()),
+					string(c.Method()),
+					rec,
+					stack,
+				)
+
+				body := map[string]any{
+					"error":  "panic recovered",
+					"detail": fmt.Sprint(rec),
 				}
-			}()
-			return c.Next()
-		}, nil
+
+				if os.Getenv("DAGFLOW_ENV") != "production" {
+					body["stack"] = stack
+				}
+
+				err = writeJSON(c, fh.StatusInternalServerError, body)
+			}
+		}()
+
+		return c.Next()
+	}, nil
 	case "logger":
 		return func(c *fh.Ctx) error {
 			start := time.Now()

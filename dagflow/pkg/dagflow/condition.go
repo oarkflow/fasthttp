@@ -137,15 +137,23 @@ func evalBCLBool(expr string, facts map[string]any) (bool, error) {
 	if expr == "" {
 		return true, nil
 	}
+	if looksLikeParsedBCLBlock(expr) {
+		return false, NewPermanentError("invalid condition shape; parsed BCL block was assigned to expression: %q", expr)
+	}
 	ok1, err := bcl.Eval(expr, facts)
 	if err != nil {
-		return false, err
+		return false, NewPermanentError("expression %q failed: %w", expr, err)
 	}
 	ok, ok2 := ok1.(bool)
 	if !ok2 {
-		return false, fmt.Errorf("expression %q did not return a boolean", expr)
+		return false, NewPermanentError("expression %q did not return a boolean", expr)
 	}
 	return ok, nil
+}
+
+func looksLikeParsedBCLBlock(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	return strings.HasPrefix(expr, "[map[") || strings.HasPrefix(expr, "map[") || strings.Contains(expr, " body:map[") || strings.Contains(expr, " action type:when")
 }
 
 func (e *Engine) workflowFacts(task *Task, node *Node, result any, extra map[string]any) map[string]any {

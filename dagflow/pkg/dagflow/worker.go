@@ -184,12 +184,13 @@ type MemoryBroker struct {
 	results   map[string]JobResult
 	consumers map[string]*memoryConsumer
 	jobQueues map[string]string
+	jobs      map[string]Job
 	events    []BrokerEvent
 	eventSeq  int64
 }
 
 func NewMemoryBroker() *MemoryBroker {
-	return &MemoryBroker{queues: map[string]*memoryQueue{}, waiters: map[string][]chan JobResult{}, results: map[string]JobResult{}, consumers: map[string]*memoryConsumer{}, jobQueues: map[string]string{}}
+	return &MemoryBroker{queues: map[string]*memoryQueue{}, waiters: map[string][]chan JobResult{}, results: map[string]JobResult{}, consumers: map[string]*memoryConsumer{}, jobQueues: map[string]string{}, jobs: map[string]Job{}}
 }
 
 func (b *MemoryBroker) record(event BrokerEvent) {
@@ -299,6 +300,7 @@ func (b *MemoryBroker) PublishToQueue(ctx context.Context, queue string, j Job) 
 		b.mu.Lock()
 		q.published++
 		b.jobQueues[j.ID] = queue
+		b.jobs[j.ID] = j
 		b.record(BrokerEvent{Event: "job.published", Queue: queue, JobID: j.ID, TaskID: j.TaskID, WorkflowID: j.WorkflowID, NodeID: j.NodeID, Attempt: j.Attempt, Status: "queued", Message: "job published"})
 		b.mu.Unlock()
 		return nil
@@ -322,10 +324,11 @@ func (b *MemoryBroker) SubscribeQueue(ctx context.Context, queue string) (<-chan
 func (b *MemoryBroker) Ack(ctx context.Context, jobID string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	job := b.jobs[jobID]
 	if queue := b.jobQueues[jobID]; queue != "" {
 		if q := b.queues[queue]; q != nil {
 			q.acked++
-			b.record(BrokerEvent{Event: "job.acked", Queue: queue, JobID: jobID, Status: "acked", Message: "job acknowledged"})
+			b.record(BrokerEvent{Event: "job.acked", Queue: queue, JobID: jobID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "acked", Message: "job acknowledged"})
 		}
 	}
 	return nil
@@ -334,10 +337,11 @@ func (b *MemoryBroker) Ack(ctx context.Context, jobID string) error {
 func (b *MemoryBroker) Nack(ctx context.Context, jobID string, err error) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	job := b.jobs[jobID]
 	if queue := b.jobQueues[jobID]; queue != "" {
 		if q := b.queues[queue]; q != nil {
 			q.nacked++
-			b.record(BrokerEvent{Event: "job.nacked", Queue: queue, JobID: jobID, Status: "nacked", Error: fmt.Sprint(err), Message: "job negatively acknowledged"})
+			b.record(BrokerEvent{Event: "job.nacked", Queue: queue, JobID: jobID, TaskID: job.TaskID, WorkflowID: job.WorkflowID, NodeID: job.NodeID, Attempt: job.Attempt, Status: "nacked", Error: fmt.Sprint(err), Message: "job negatively acknowledged"})
 		}
 	}
 	return nil
@@ -352,7 +356,15 @@ func (b *MemoryBroker) Complete(ctx context.Context, r JobResult) error {
 	if r.Queue != "" {
 		if q := b.queues[r.Queue]; q != nil {
 			q.completed++
-			b.record(BrokerEvent{Event: "job.completed", Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: "completed", Error: r.Error, Message: "job result completed"})
+			event := "job.completed"
+			status := "completed"
+			message := "job completed successfully"
+			if r.Error != "" {
+				event = "job.result.failed"
+				status = "failed"
+				message = "job result released with failure"
+			}
+			b.record(BrokerEvent{Event: event, Queue: r.Queue, JobID: r.JobID, TaskID: r.TaskID, WorkflowID: r.WorkflowID, NodeID: r.NodeID, Status: status, Error: r.Error, Message: message})
 		}
 	}
 	b.mu.Unlock()
@@ -548,6 +560,9 @@ func (b *MemoryBroker) nackJob(ctx context.Context, job Job, err error) bool {
 	}
 	b.mu.RUnlock()
 	maxAttempts := queueMaxAttempts(job, cfg, 1)
+	if IsPermanentError(err) || isPermanentErrorText(err.Error()) {
+		maxAttempts = 1
+	}
 	nextAttempt := job.Attempt + 1
 	if job.Attempt <= 0 {
 		nextAttempt = 2

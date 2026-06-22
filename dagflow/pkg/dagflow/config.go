@@ -383,6 +383,7 @@ func supplementConfigFromBCL(filename string, data []byte, cfg *Config) {
 	if cfg == nil || len(data) == 0 {
 		return
 	}
+	supplementTaskRulesFromBCL(data, cfg)
 	for _, sc := range parseSchemaBlocks(data) {
 		merged := false
 		for i := range cfg.Schemas {
@@ -404,6 +405,286 @@ func supplementConfigFromBCL(filename string, data []byte, cfg *Config) {
 			cfg.Schemas = append(cfg.Schemas, sc)
 		}
 	}
+}
+
+func supplementTaskRulesFromBCL(data []byte, cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	text := string(data)
+	workflowBlocks := extractNamedBlocks(text, "workflow")
+	for _, wb := range workflowBlocks {
+		wf := findWorkflowConfig(cfg, wb.name)
+		if wf == nil {
+			continue
+		}
+		for _, rb := range extractDirectNamedBlocks(wb.body, "rule") {
+			rc := parseTaskRuleBlock(rb)
+			mergeWorkflowRuleConfig(wf, rc)
+		}
+		for _, nb := range extractDirectNamedBlocks(wb.body, "node") {
+			nc := findNodeConfig(wf, nb.name)
+			if nc == nil {
+				continue
+			}
+			for _, rb := range extractDirectNamedBlocks(nb.body, "rule") {
+				rc := parseTaskRuleBlock(rb)
+				mergeNodeRuleConfig(nc, rc)
+			}
+		}
+	}
+}
+
+func findWorkflowConfig(cfg *Config, id string) *WorkflowConfig {
+	for i := range cfg.Workflows {
+		if cfg.Workflows[i].ID == id {
+			return &cfg.Workflows[i]
+		}
+	}
+	return nil
+}
+
+func findNodeConfig(wf *WorkflowConfig, id string) *NodeConfig {
+	if wf == nil {
+		return nil
+	}
+	for i := range wf.Nodes {
+		if wf.Nodes[i].ID == id {
+			return &wf.Nodes[i]
+		}
+	}
+	return nil
+}
+
+func mergeWorkflowRuleConfig(wf *WorkflowConfig, rc TaskRuleConfig) {
+	if wf == nil || rc.ID == "" {
+		return
+	}
+	for i := range wf.Rules {
+		if wf.Rules[i].ID == rc.ID {
+			mergeTaskRuleConfig(&wf.Rules[i], rc)
+			return
+		}
+	}
+	wf.Rules = append(wf.Rules, rc)
+}
+
+func mergeNodeRuleConfig(nc *NodeConfig, rc TaskRuleConfig) {
+	if nc == nil || rc.ID == "" {
+		return
+	}
+	for i := range nc.Rules {
+		if nc.Rules[i].ID == rc.ID {
+			mergeTaskRuleConfig(&nc.Rules[i], rc)
+			return
+		}
+	}
+	nc.Rules = append(nc.Rules, rc)
+}
+
+func mergeTaskRuleConfig(dst *TaskRuleConfig, src TaskRuleConfig) {
+	if dst == nil {
+		return
+	}
+	if src.When != "" {
+		dst.When = src.When
+	}
+	if src.Condition != "" {
+		dst.Condition = src.Condition
+	}
+	if src.Message != "" {
+		dst.Message = src.Message
+	}
+	if len(src.Events) > 0 {
+		dst.Events = src.Events
+	}
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.Action.Type != "" {
+		dst.Action = src.Action
+	}
+}
+
+func parseTaskRuleBlock(b namedBCLBlock) TaskRuleConfig {
+	rc := TaskRuleConfig{ID: b.name}
+	rc.When = parseBCLStringLikeLine(b.body, "when")
+	rc.Condition = parseBCLStringLikeLine(b.body, "condition")
+	rc.Message = parseBCLStringLikeLine(b.body, "message")
+	if ev := parseBCLStringArrayLine(b.body, "events"); len(ev) > 0 {
+		rc.Events = ev
+	}
+	if m := boolLineRE("enabled").FindStringSubmatch(b.body); len(m) == 2 {
+		v := strings.EqualFold(m[1], "true")
+		rc.Enabled = &v
+	}
+	if abs := extractDirectNamedBlocks(b.body, "action"); len(abs) > 0 {
+		rc.Action = parseTaskActionBlock(abs[0].body)
+	} else if abody, ok := extractDirectAnonymousBlock(b.body, "action"); ok {
+		rc.Action = parseTaskActionBlock(abody)
+	}
+	return rc
+}
+
+func parseTaskActionBlock(body string) TaskActionConfig {
+	return TaskActionConfig{
+		Type:      TaskActionType(parseBCLIdentOrStringLine(body, "type")),
+		Channels:  parseBCLStringArrayLine(body, "channels"),
+		Reason:    parseBCLStringLikeLine(body, "reason"),
+		Mode:      parseBCLIdentOrStringLine(body, "mode"),
+		Approvers: parseBCLStringArrayLine(body, "approvers"),
+		Timeout:   parseBCLStringLikeLine(body, "timeout"),
+	}
+}
+
+func parseBCLStringLikeLine(body, key string) string {
+	lines := strings.Split(body, "\n")
+	prefix := key + " "
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		return normalizeBCLExpr(value)
+	}
+	return ""
+}
+
+func parseBCLIdentOrStringLine(body, key string) string {
+	v := parseBCLStringLikeLine(body, key)
+	return strings.Trim(v, `"`)
+}
+
+func parseBCLStringArrayLine(body, key string) []string {
+	if m := arrayLineRE(key).FindStringSubmatch(body); len(m) == 2 {
+		return parseStringArray(m[1])
+	}
+	return nil
+}
+
+func extractDirectNamedBlocks(text, kind string) []namedBCLBlock {
+	var out []namedBCLBlock
+	forEachDirectBlock(text, func(name, blockKind, body string) {
+		if blockKind == kind && name != "" {
+			out = append(out, namedBCLBlock{name: name, body: body})
+		}
+	})
+	return out
+}
+
+func extractDirectAnonymousBlock(text, kind string) (string, bool) {
+	var found string
+	ok := false
+	forEachDirectBlock(text, func(name, blockKind, body string) {
+		if !ok && blockKind == kind && name == "" {
+			found = body
+			ok = true
+		}
+	})
+	return found, ok
+}
+
+func forEachDirectBlock(text string, fn func(name, kind, body string)) {
+	depth := 0
+	inString := false
+	inRaw := false
+	esc := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if inRaw {
+			if c == '`' {
+				inRaw = false
+			}
+			continue
+		}
+		if inString {
+			if esc {
+				esc = false
+				continue
+			}
+			if c == '\\' {
+				esc = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '`':
+			inRaw = true
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && (isIdentStart(c)) && (i == 0 || !isIdentPart(text[i-1])) {
+				kindStart := i
+				j := i + 1
+				for j < len(text) && isIdentPart(text[j]) {
+					j++
+				}
+				kind := text[kindStart:j]
+				k := skipSpaces(text, j)
+				name := ""
+				if k < len(text) && text[k] == '"' {
+					nameStart := k + 1
+					nameEnd := scanQuotedStringEnd(text, k)
+					if nameEnd < 0 {
+						continue
+					}
+					name = text[nameStart:nameEnd]
+					k = skipSpaces(text, nameEnd+1)
+				}
+				if k < len(text) && text[k] == '{' {
+					close := matchingBrace(text, k)
+					if close >= 0 {
+						fn(name, kind, text[k+1:close])
+						i = close
+					}
+				}
+			}
+		}
+	}
+}
+
+func skipSpaces(text string, i int) int {
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n') {
+		i++
+	}
+	return i
+}
+
+func scanQuotedStringEnd(text string, quote int) int {
+	esc := false
+	for i := quote + 1; i < len(text); i++ {
+		if esc {
+			esc = false
+			continue
+		}
+		if text[i] == '\\' {
+			esc = true
+			continue
+		}
+		if text[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+func isIdentPart(c byte) bool {
+	return isIdentStart(c) || c >= '0' && c <= '9' || c == '-' || c == '_'
 }
 
 func parseSchemaBlocks(data []byte) []SchemaConfig {
