@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/csrf"
 	"github.com/oarkflow/spl"
 )
 
@@ -152,6 +153,12 @@ func main() {
 		TemplateEngine:     splEngine,
 	})
 
+	// CSRF must run before pages/API routes.
+	// A safe GET creates the csrf_token cookie and exposes the token through
+	// c.Locals("csrf_token"). Unsafe methods must send the same value in
+	// X-CSRF-Token while the browser sends the cookie automatically.
+	app.Use(csrf.New())
+
 	app.Get("/static/"+runtimeName, func(c *fh.Ctx) error {
 		c.Set("Content-Type", "application/javascript")
 		c.Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -170,7 +177,16 @@ func main() {
 	app.Static("/uploads", "./uploads", fh.StaticConfig{})
 
 	app.Get("/", func(c *fh.Ctx) error {
-		return c.Render("upload", map[string]any{"title": "File Upload with Reactivity"})
+		return c.Render("upload", map[string]any{
+			"title":     "File Upload with Reactivity + CSRF",
+			"csrfToken": c.Locals("csrf_token"),
+		})
+	})
+
+	app.Get("/csrf-token", func(c *fh.Ctx) error {
+		return c.JSON(map[string]any{
+			"token": c.Locals("csrf_token"),
+		})
 	})
 
 	app.Post("/upload", func(c *fh.Ctx) error {
