@@ -1,0 +1,20 @@
+# Named queue definitions are generic and can be reused by any workflow.
+queue "email_jobs" {
+  capacity 4096
+  max_attempts 3
+  visibility_timeout "30s"
+  dlq "email_jobs_dlq"
+}
+
+queue "email_jobs_dlq" {
+  capacity 4096
+}
+
+# A workflow consumer turns queued messages into DAGFlow workflow tasks.
+# It can be paused/resumed/stopped through /ops/consumers/:id/* without affecting HTTP routes.
+consumer "email_jobs_consumer" {
+  queue "email_jobs"
+  workflow "notification_approval_demo"
+  concurrency 4
+  enabled true
+}

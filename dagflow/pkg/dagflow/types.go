@@ -43,6 +43,7 @@ const (
 	RouteDetached RouteMode = "detached"
 	RouteStream   RouteMode = "stream"
 	RouteWebhook  RouteMode = "webhook"
+	RouteQueue    RouteMode = "queue"
 
 	TaskPending   TaskStatus = "pending"
 	TaskRunning   TaskStatus = "running"

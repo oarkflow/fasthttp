@@ -27,6 +27,8 @@ type Config struct {
 	Schemas           []SchemaConfig              `bcl:"schema,block"`
 	Scripts           []ScriptConfig              `bcl:"script,block"`
 	Notifications     []NotificationChannelConfig `bcl:"notification_channel,block"`
+	Queues            []QueueConfig               `bcl:"queue,block"`
+	Consumers         []QueueConsumerConfig       `bcl:"consumer,block"`
 }
 
 type ServerConfig struct {
@@ -235,6 +237,7 @@ type RouteConfig struct {
 	Method       string         `bcl:"method" json:"method"`
 	Path         string         `bcl:"path" json:"path"`
 	Workflow     string         `bcl:"workflow,omitempty" json:"workflow,omitempty"`
+	Queue        string         `bcl:"queue,omitempty" json:"queue,omitempty"`
 	Chain        string         `bcl:"chain,omitempty" json:"chain,omitempty"`
 	Workflows    []string       `bcl:"workflows,omitempty" json:"workflows,omitempty"`
 	Mode         RouteMode      `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
@@ -364,6 +367,8 @@ func mergeConfig(dst, src *Config) {
 	dst.Schemas = append(dst.Schemas, src.Schemas...)
 	dst.Scripts = append(dst.Scripts, src.Scripts...)
 	dst.Notifications = append(dst.Notifications, src.Notifications...)
+	dst.Queues = append(dst.Queues, src.Queues...)
+	dst.Consumers = append(dst.Consumers, src.Consumers...)
 }
 
 func decodeBCL(data []byte) (*Config, error) {

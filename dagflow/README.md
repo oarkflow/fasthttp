@@ -2106,3 +2106,126 @@ curl -s -X POST localhost:8080/workflow/notification_approval_demo \
   -H 'Content-Type: application/json' \
   -d '{"to":"blocked@blocked.test","subject":"Hi","body":"Blocked"}' | jq
 ```
+
+---
+
+## Managed queues, workflow consumers, and sync/async queue execution
+
+DAGFlow now has a managed broker layer so a workflow can run behind a background queue consumer instead of being executed only from an HTTP request goroutine. The same workflow definition can run inline, async, distributed-node mode, or queue-backed mode.
+
+### Core concepts
+
+- `queue` defines a named broker queue with capacity, retry metadata, visibility timeout, and DLQ name.
+- `consumer` binds a queue to a workflow and starts one or more background workers.
+- `mode queue` on a BCL route enqueues the request as a workflow task instead of executing it directly.
+- `await=true` on a queue route or enqueue API waits for the queue result and returns the completed workflow result.
+- Without `await=true`, the route/API returns `202 Accepted` with a task receipt while the consumer processes the task in the background.
+- Consumers are runtime-controlled with pause, resume, and stop operations.
+
+### BCL queue configuration
+
+```bcl
+queue "email_jobs" {
+  capacity 4096
+  max_attempts 3
+  visibility_timeout "30s"
+  dlq "email_jobs_dlq"
+}
+
+queue "email_jobs_dlq" {
+  capacity 4096
+}
+
+consumer "email_jobs_consumer" {
+  queue "email_jobs"
+  workflow "notification_approval_demo"
+  concurrency 4
+  enabled true
+}
+```
+
+### Queue-backed route
+
+```bcl
+route "notification_approval_demo_queue" {
+  method "POST"
+  path "/notification-approval-demo/queue"
+  workflow "notification_approval_demo"
+  queue "email_jobs"
+  mode queue
+  input_schema "EmailRequest"
+  envelope true
+
+  data {
+    map {
+      to "body.to"
+      subject "body.subject"
+      body "body.body"
+    }
+  }
+}
+```
+
+### Queue operations API
+
+List queues:
+
+```bash
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/queues
+```
+
+List consumers:
+
+```bash
+curl -H "X-API-Key: dev-secret" http://localhost:8080/ops/consumers
+```
+
+Pause/resume/stop a consumer:
+
+```bash
+curl -X POST -H "X-API-Key: dev-secret" http://localhost:8080/ops/consumers/email_jobs_consumer/pause
+curl -X POST -H "X-API-Key: dev-secret" http://localhost:8080/ops/consumers/email_jobs_consumer/resume
+curl -X POST -H "X-API-Key: dev-secret" http://localhost:8080/ops/consumers/email_jobs_consumer/stop
+```
+
+Enqueue a workflow task through the protected operations API:
+
+```bash
+curl -X POST http://localhost:8080/ops/queues/email_jobs/workflows/notification_approval_demo/enqueue \
+  -H "X-API-Key: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"user@example.com","subject":"hello","body":"queued message"}'
+```
+
+Wait synchronously for the queued result:
+
+```bash
+curl -X POST 'http://localhost:8080/ops/queues/email_jobs/workflows/notification_approval_demo/enqueue?await=true' \
+  -H "X-API-Key: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"user@example.com","subject":"hello","body":"queued message"}'
+```
+
+Use the public BCL route in async queue mode:
+
+```bash
+curl -X POST http://localhost:8080/api/email/notification-approval-demo/queue \
+  -H "X-API-Key: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"user@example.com","subject":"hello","body":"queued message"}'
+```
+
+Use the same route synchronously through the queue:
+
+```bash
+curl -X POST 'http://localhost:8080/api/email/notification-approval-demo/queue?await=true' \
+  -H "X-API-Key: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"user@example.com","subject":"hello","body":"queued message"}'
+```
+
+### Production storage behavior
+
+With the default memory runtime, queue state is in-process and suitable for local development and tests. With `DAGFLOW_STORE=postgres`, jobs are stored in `dagflow_jobs` with queue name, status, attempts, visibility timestamp, lease owner, result, and error data. Postgres consumers claim jobs using `FOR UPDATE SKIP LOCKED`, heartbeat through the existing lease model, retry failed jobs, and recover expired running jobs back to retry state.
+
+Existing workflow features continue to work with queue-backed execution: notification rules, task filters, manual approvals, node stats, task audit logs, idempotency, distributed node execution, retries, DLQ recording, route data mapping, schemas, and response shaping.

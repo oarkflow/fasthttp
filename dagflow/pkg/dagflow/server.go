@@ -141,6 +141,12 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 	app.Post("/ops/approvals/bulk/approve", opsGuard(opsBulkApprove(engine)))
 	app.Post("/ops/approvals/bulk/reject", opsGuard(opsBulkReject(engine)))
 	app.Get("/ops/leases", opsGuard(opsLeases(engine)))
+	app.Get("/ops/queues", opsGuard(opsQueues(engine)))
+	app.Get("/ops/consumers", opsGuard(opsConsumers(engine)))
+	app.Post("/ops/consumers/:id/pause", opsGuard(opsConsumerAction(engine, "pause")))
+	app.Post("/ops/consumers/:id/resume", opsGuard(opsConsumerAction(engine, "resume")))
+	app.Post("/ops/consumers/:id/stop", opsGuard(opsConsumerAction(engine, "stop")))
+	app.Post("/ops/queues/:queue/workflows/:workflow/enqueue", opsGuard(opsEnqueueWorkflow(engine)))
 	app.Get("/ops/workflows", opsGuard(opsWorkflows(engine)))
 	app.Get("/ops/workflows/:id", opsGuard(opsWorkflow(engine)))
 	app.Get("/ops/workflows/:id/metadata", opsGuard(opsWorkflow(engine)))
@@ -363,6 +369,54 @@ func ExitOnCLIError(err error) {
 		log.Fatal(err)
 	}
 	_ = os.Stdout
+}
+
+func opsQueues(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.QueueInfo()) }
+}
+func opsConsumers(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error { return writeJSON(c, fh.StatusOK, engine.ConsumerInfo()) }
+}
+func opsConsumerAction(engine *Engine, action string) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		id := c.Param("id")
+		var err error
+		switch action {
+		case "pause":
+			err = engine.PauseConsumer(id)
+		case "resume":
+			err = engine.ResumeConsumer(id)
+		case "stop":
+			err = engine.StopConsumer(id)
+		default:
+			err = fmt.Errorf("unknown consumer action %s", action)
+		}
+		if err != nil {
+			return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+		}
+		return writeJSON(c, fh.StatusOK, map[string]any{"id": id, "action": action, "ok": true, "consumers": engine.ConsumerInfo()})
+	}
+}
+func opsEnqueueWorkflow(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		input, err := readJSONBody(c)
+		if err != nil {
+			return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+		}
+		await := c.Query("await") == "true" || c.Query("await") == "1" || c.Query("mode") == "sync"
+		task, err := engine.EnqueueWorkflow(c.Context(), c.Param("workflow"), input, QueueSubmitOptions{Queue: c.Param("queue"), Await: await})
+		if err != nil {
+			status := fh.StatusInternalServerError
+			if task != nil && task.Status == TaskFailed {
+				return writeJSON(c, status, taskOrError(task, err))
+			}
+			return writeJSON(c, status, map[string]any{"error": err.Error()})
+		}
+		if await {
+			return writeJSON(c, fh.StatusOK, publicTaskResult(task))
+		}
+		return writeJSON(c, fh.StatusAccepted, publicTaskReceipt(task))
+	}
 }
 
 func opsNotifications(engine *Engine) fh.HandlerFunc {

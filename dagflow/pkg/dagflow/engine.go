@@ -11,24 +11,26 @@ import (
 )
 
 type Engine struct {
-	mu             sync.RWMutex
-	flows          map[string]*Workflow
-	chains         map[string]*Chain
-	conditions     map[string]ConditionSpec
-	schemas        map[string]SchemaDef
-	snapshots      map[string][]WorkflowSnapshot
-	handlers       map[string]Handler
-	scriptHandlers map[string]string
-	dataSources    map[string]DataSourceFunc
-	metrics        *MetricsRegistry
-	runtime        *ScriptRuntime
-	store          TaskStore
-	chainStore     ChainStore
-	callbacks      []FinalCallback
-	local          *LocalQueue
-	broker         Broker
-	activityLog    chan AuditEvent
-	notifier       *NotificationDispatcher
+	mu              sync.RWMutex
+	flows           map[string]*Workflow
+	chains          map[string]*Chain
+	conditions      map[string]ConditionSpec
+	schemas         map[string]SchemaDef
+	snapshots       map[string][]WorkflowSnapshot
+	handlers        map[string]Handler
+	scriptHandlers  map[string]string
+	dataSources     map[string]DataSourceFunc
+	metrics         *MetricsRegistry
+	runtime         *ScriptRuntime
+	store           TaskStore
+	chainStore      ChainStore
+	callbacks       []FinalCallback
+	local           *LocalQueue
+	broker          Broker
+	activityLog     chan AuditEvent
+	notifier        *NotificationDispatcher
+	queueConfigs    []QueueConfig
+	consumerConfigs []QueueConsumerConfig
 }
 
 func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
@@ -85,8 +87,20 @@ func (e *Engine) OnFinal(cb FinalCallback) {
 }
 func (e *Engine) Store() TaskStore       { return e.store }
 func (e *Engine) ChainStore() ChainStore { return e.chainStore }
+func (e *Engine) Broker() Broker         { return e.broker }
 
 func (e *Engine) LoadConfig(cfg *Config) error {
+	if cfg != nil {
+		e.queueConfigs = append([]QueueConfig(nil), cfg.Queues...)
+		e.consumerConfigs = append([]QueueConsumerConfig(nil), cfg.Consumers...)
+		if qb, ok := e.broker.(interface{ EnsureQueue(QueueConfig) error }); ok {
+			for _, qc := range cfg.Queues {
+				if err := qb.EnsureQueue(qc); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	for _, nc := range cfg.Notifications {
 		if err := e.RegisterNotificationChannel(NotificationChannel(nc)); err != nil {
 			return err
@@ -125,10 +139,24 @@ func (e *Engine) LoadConfig(cfg *Config) error {
 
 func (e *Engine) Start(ctx context.Context) error {
 	e.local.Start(ctx)
+	if mb, ok := e.broker.(ManagedBroker); ok {
+		for _, cc := range e.consumerConfigs {
+			if cc.ID == "" {
+				cc.ID = "workflow-consumer:" + cc.Queue + ":" + cc.Workflow
+			}
+			if cc.Workflow != "" {
+				if err := mb.StartConsumer(ctx, cc, e.executeJob); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	e.mu.RLock()
 	ids := make([]string, 0, len(e.flows))
-	for id := range e.flows {
-		ids = append(ids, id)
+	for id, wf := range e.flows {
+		if wf.Mode == ModeDistributed {
+			ids = append(ids, id)
+		}
 	}
 	e.mu.RUnlock()
 	for _, id := range ids {
@@ -391,6 +419,9 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 		node := wf.Nodes[item.NodeID]
 		if node == nil {
 			return fmt.Errorf("node %s not found", item.NodeID)
+		}
+		if task.Visits == nil {
+			task.Visits = map[string]int{}
 		}
 		task.Visits[node.ID]++
 		if task.Visits[node.ID] > wf.MaxVisits {

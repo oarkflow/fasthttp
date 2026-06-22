@@ -141,6 +141,7 @@ func (s *PostgresStorage) Migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS dagflow_jobs (
  id text PRIMARY KEY,
  workflow_id text NOT NULL,
+ queue text NOT NULL DEFAULT '',
  status text NOT NULL,
  attempts integer NOT NULL DEFAULT 0,
  visible_at timestamptz NOT NULL,
@@ -152,7 +153,9 @@ func (s *PostgresStorage) Migrate(ctx context.Context) error {
  updated_at timestamptz NOT NULL,
  data jsonb NOT NULL
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_dagflow_jobs_claim ON dagflow_jobs(workflow_id,status,visible_at,created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_dagflow_jobs_claim ON dagflow_jobs(queue,status,visible_at,created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_dagflow_jobs_workflow ON dagflow_jobs(workflow_id,status,updated_at)`,
+		`ALTER TABLE dagflow_jobs ADD COLUMN IF NOT EXISTS queue text NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS dagflow_node_dedup (
  dedup_key text PRIMARY KEY,
  task_id text NOT NULL,
@@ -499,7 +502,7 @@ func (s *PostgresStorage) EnqueueJob(ctx context.Context, job Job) error {
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO dagflow_jobs(id,workflow_id,status,attempts,visible_at,created_at,updated_at,data) VALUES($1,$2,'queued',0,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data`, job.ID, job.WorkflowID, now, job.CreatedAt, now, jsonBytes(job))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO dagflow_jobs(id,workflow_id,queue,status,attempts,visible_at,created_at,updated_at,data) VALUES($1,$2,$3,'queued',0,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data, queue=EXCLUDED.queue`, job.ID, job.WorkflowID, job.Queue, now, job.CreatedAt, now, jsonBytes(job))
 	return err
 }
 func (s *PostgresStorage) ClaimJob(ctx context.Context, workflowID, workerID string, lease time.Duration) (Job, error) {
@@ -510,7 +513,7 @@ func (s *PostgresStorage) ClaimJob(ctx context.Context, workflowID, workerID str
 	defer tx.Rollback()
 	var b []byte
 	var id string
-	err = tx.QueryRowContext(ctx, `SELECT id,data FROM dagflow_jobs WHERE workflow_id=$1 AND status IN('queued','retry') AND visible_at<=now() ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, workflowID).Scan(&id, &b)
+	err = tx.QueryRowContext(ctx, `SELECT id,data FROM dagflow_jobs WHERE queue=$1 AND status IN('queued','retry') AND visible_at<=now() ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, workflowID).Scan(&id, &b)
 	if err != nil {
 		return Job{}, err
 	}

@@ -126,7 +126,7 @@ func compileRoute(rc RouteConfig, e *Engine) (compiledRoute, error) {
 	if rc.Mode == "" {
 		rc.Mode = RouteSync
 	}
-	if rc.Mode != RouteSync && rc.Mode != RouteAsync && rc.Mode != RouteDetached && rc.Mode != RouteStream && rc.Mode != RouteWebhook {
+	if rc.Mode != RouteSync && rc.Mode != RouteAsync && rc.Mode != RouteDetached && rc.Mode != RouteStream && rc.Mode != RouteWebhook && rc.Mode != RouteQueue {
 		return compiledRoute{}, fmt.Errorf("route %s unsupported mode %s", rc.ID, rc.Mode)
 	}
 	targets := 0
@@ -187,6 +187,18 @@ func (a *HTTPApp) handleWorkflowRoute(c *fh.Ctx, rc RouteConfig, params map[stri
 			} else if ok {
 				return a.writeRouteResult(c, fh.StatusOK, rc, params, input, existing.Result)
 			}
+		}
+		if rc.Mode == RouteQueue {
+			await := c.Query("await") == "true" || c.Query("await") == "1" || c.Query("mode") == "sync"
+			task, err := a.engine.EnqueueWorkflow(ctx, rc.Workflow, input, QueueSubmitOptions{Queue: rc.Queue, Await: await})
+			a.engine.recordIdempotencyFromRequest(c, rc.Workflow, input, task)
+			if err != nil {
+				return writeJSON(c, fh.StatusInternalServerError, taskOrError(task, err))
+			}
+			if await {
+				return a.writeRouteResult(c, fh.StatusOK, rc, params, input, task.Result)
+			}
+			return writeJSON(c, fh.StatusAccepted, publicTaskReceipt(task))
 		}
 		if rc.Mode == RouteAsync || rc.Mode == RouteDetached {
 			task, err := a.engine.RunAsync(ctx, rc.Workflow, input)
