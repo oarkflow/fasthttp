@@ -1,7 +1,0 @@
-2026/06/22 08:49:10 storage=file queue=memory; set DAGFLOW_STORE=postgres for production
-2026/06/22 08:49:10 listening on :8080
-2026/06/22 08:49:10 [fasthttp] Listening on [::]:8080
-2026/06/22 08:49:21 dagflow activity task=task_ce9b33f604304735 workflow=notification_approval_demo node= event=queue.task.enqueued message="workflow task enqueued"
-2026/06/22 08:49:21 dagflow activity task=task_ce9b33f604304735 workflow=notification_approval_demo node= event=queue.task.started message="queued workflow task started"
-2026/06/22 08:49:22 dagflow activity task=task_ce9b33f604304735 workflow=notification_approval_demo node=receive event=queue.task.started message="queued workflow task started"
-2026/06/22 08:49:24 dagflow activity task=task_ce9b33f604304735 workflow=notification_approval_demo node=receive event=queue.task.started message="queued workflow task started"
