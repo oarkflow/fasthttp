@@ -164,7 +164,22 @@ func evalBCLBool(expr string, facts map[string]any) (bool, error) {
 	if looksLikeParsedBCLBlock(expr) {
 		return false, NewPermanentError("invalid condition shape; parsed BCL block was assigned to expression: %q", expr)
 	}
-	ok1, err := bcl.Eval(expr, normalizeFactsForBCL(facts))
+	normalizedFacts := normalizeFactsForBCL(facts)
+
+	// Evaluate common boolean guard expressions with DAGFlow's deterministic evaluator first.
+	// This avoids accidental truthy behavior or ambiguous map/list handling from the BCL
+	// runtime for workflow control expressions such as:
+	//   node.id == "validate" && input.to == "blocked@blocked.test"
+	//   input.request.subject == "approval" || input.request.subject == "sensitive"
+	//   result.valid == true
+	if ok, handled, err := evalSimpleBoolExpression(expr, normalizedFacts); handled {
+		if err != nil {
+			return false, NewPermanentError("expression %q failed: %w", expr, err)
+		}
+		return ok, nil
+	}
+
+	ok1, err := bcl.Eval(expr, normalizedFacts)
 	if err != nil {
 		return false, NewPermanentError("expression %q failed: %w", expr, err)
 	}
