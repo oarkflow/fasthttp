@@ -57,6 +57,7 @@ type Config struct {
 	ReadBufferSize       int
 	MaxRequestBodySize   int
 	MaxHeaderListSize    int
+	MaxHeaderCount       int
 	MaxRequestLineSize   int
 	MaxConcurrentStreams uint32
 	DisableKeepAlive     bool
@@ -80,6 +81,7 @@ var defaultConfig = Config{
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
+	MaxHeaderCount:       64,
 	MaxRequestLineSize:   8 << 10,
 	MaxConcurrentStreams: 128,
 }
@@ -109,6 +111,9 @@ type App struct {
 	groups       []*Group
 	lastRoute    namedRoute
 	errorCounts  sync.Map // error code -> *atomic.Uint64
+	routeMetaMu  sync.RWMutex
+	routeMeta    []RouteInfo
+	openapi      OpenAPIConfig
 	reliability  *Reliability
 }
 
@@ -142,6 +147,9 @@ func New(config ...Config) *App {
 		}
 		if c.MaxHeaderListSize > 0 {
 			cfg.MaxHeaderListSize = c.MaxHeaderListSize
+		}
+		if c.MaxHeaderCount > 0 {
+			cfg.MaxHeaderCount = c.MaxHeaderCount
 		}
 		if c.MaxRequestLineSize > 0 {
 			cfg.MaxRequestLineSize = c.MaxRequestLineSize
@@ -216,6 +224,7 @@ func (a *App) Add(method, path string, handlers ...HandlerFunc) *App {
 		}
 	}
 	a.router.Add(method, path, a.chain(handlers))
+	a.registerRouteInfo(RouteInfo{Method: strings.ToUpper(strings.TrimSpace(method)), Path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)})
 	a.lastRoute = namedRoute{method: strings.ToUpper(strings.TrimSpace(method)), path: normalizeRoutePath(strings.ToUpper(strings.TrimSpace(method)), path)}
 	return a
 }
@@ -707,7 +716,7 @@ func (a *App) serveConn(conn net.Conn) {
 			return
 		}
 
-		_, err = parseHeaders(accumulated[consumed:headEnd+4], &ctx.Header)
+		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount)
 		if err != nil {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError400)

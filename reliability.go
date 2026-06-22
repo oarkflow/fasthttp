@@ -1064,6 +1064,7 @@ type ReliabilityPolicy struct {
 	Journal                bool
 	ReplayResponse         bool
 	ConflictOnBodyDrift    bool
+	MaxReplayAge           time.Duration
 	IdempotencyKey         func(*Ctx) string
 	IdempotencyFingerprint func(*Ctx) string
 	Data                   DataPolicy

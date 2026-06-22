@@ -850,8 +850,12 @@ type VersionPolicy struct {
 	Header     string
 	Default    string
 	Supported  []string
+	Allowed    []string
 	Deprecated map[string]string
 }
+
+// APIVersionConfig is the public alias used by applications. Allowed and Supported are synonyms.
+type APIVersionConfig = VersionPolicy
 
 func APIVersion(p VersionPolicy) HandlerFunc {
 	if p.Header == "" {
@@ -862,7 +866,11 @@ func APIVersion(p VersionPolicy) HandlerFunc {
 		if v == "" {
 			v = p.Default
 		}
-		if len(p.Supported) > 0 && !containsFold(p.Supported, v) {
+		supported := p.Supported
+		if len(supported) == 0 {
+			supported = p.Allowed
+		}
+		if len(supported) > 0 && !containsFold(supported, v) {
 			return c.Status(StatusBadRequest).JSON(Map{"error": "unsupported_api_version", "version": v})
 		}
 		c.Locals("api_version", v)
@@ -902,7 +910,20 @@ func (r *Reliability) Repair(ctx context.Context) error {
 	return nil
 }
 
-func DeterministicIdempotency(parts ...string) string {
+// DeterministicIdempotency installs an idempotency-key derivation middleware.
+func DeterministicIdempotency(fn func(*Ctx) string) HandlerFunc {
+	return func(c *Ctx) error {
+		if fn != nil {
+			if key := fn(c); key != "" {
+				c.Header.Set(HeaderIdempotencyKey, key)
+			}
+		}
+		return c.Next()
+	}
+}
+
+// DeterministicIdempotencyKey creates a stable key from deterministic parts.
+func DeterministicIdempotencyKey(parts ...string) string {
 	h := sha256.New()
 	for _, p := range parts {
 		h.Write([]byte(p))
