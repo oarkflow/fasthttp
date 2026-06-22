@@ -25,13 +25,15 @@ type ExtendedStore interface {
 }
 
 type durableState struct {
-	Tasks       map[string]*Task              `json:"tasks"`
-	Chains      map[string]*ChainRun          `json:"chains"`
-	Idempotency map[string]IdempotencyRecord  `json:"idempotency"`
-	DLQ         map[string]DLQItem            `json:"dlq"`
-	Outbox      map[string]OutboxEvent        `json:"outbox"`
-	Leases      map[string]WorkerLease        `json:"leases"`
-	Snapshots   map[string][]WorkflowSnapshot `json:"snapshots"`
+	Tasks         map[string]*Task                `json:"tasks"`
+	Chains        map[string]*ChainRun            `json:"chains"`
+	Idempotency   map[string]IdempotencyRecord    `json:"idempotency"`
+	DLQ           map[string]DLQItem              `json:"dlq"`
+	Outbox        map[string]OutboxEvent          `json:"outbox"`
+	Leases        map[string]WorkerLease          `json:"leases"`
+	Snapshots     map[string][]WorkflowSnapshot   `json:"snapshots"`
+	Notifications map[string]NotificationDelivery `json:"notifications"`
+	Approvals     map[string]ApprovalRequest      `json:"approvals"`
 }
 
 type FileStore struct {
@@ -44,7 +46,7 @@ func NewFileStore(path string) (*FileStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	s := &FileStore{path: path, state: durableState{Tasks: map[string]*Task{}, Chains: map[string]*ChainRun{}, Idempotency: map[string]IdempotencyRecord{}, DLQ: map[string]DLQItem{}, Outbox: map[string]OutboxEvent{}, Leases: map[string]WorkerLease{}, Snapshots: map[string][]WorkflowSnapshot{}}}
+	s := &FileStore{path: path, state: durableState{Tasks: map[string]*Task{}, Chains: map[string]*ChainRun{}, Idempotency: map[string]IdempotencyRecord{}, DLQ: map[string]DLQItem{}, Outbox: map[string]OutboxEvent{}, Leases: map[string]WorkerLease{}, Snapshots: map[string][]WorkflowSnapshot{}, Notifications: map[string]NotificationDelivery{}, Approvals: map[string]ApprovalRequest{}}}
 	if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
 		_ = json.Unmarshal(b, &s.state)
 		s.ensure()
@@ -72,6 +74,12 @@ func (s *FileStore) ensure() {
 	}
 	if s.state.Snapshots == nil {
 		s.state.Snapshots = map[string][]WorkflowSnapshot{}
+	}
+	if s.state.Notifications == nil {
+		s.state.Notifications = map[string]NotificationDelivery{}
+	}
+	if s.state.Approvals == nil {
+		s.state.Approvals = map[string]ApprovalRequest{}
 	}
 }
 func (s *FileStore) persistLocked() error {
@@ -277,3 +285,54 @@ func (s FileChainStore) List() []*ChainRun {
 	return out
 }
 func (s *FileStore) ChainStore() ChainStore { return FileChainStore{fs: s} }
+
+func (s *FileStore) SaveNotificationDelivery(d NotificationDelivery) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Notifications == nil {
+		s.state.Notifications = map[string]NotificationDelivery{}
+	}
+	s.state.Notifications[d.ID] = d
+	return s.persistLocked()
+}
+func (s *FileStore) ListNotificationDeliveries() []NotificationDelivery {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]NotificationDelivery, 0, len(s.state.Notifications))
+	for _, v := range s.state.Notifications {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
+}
+func (s *FileStore) SaveApproval(a ApprovalRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Approvals == nil {
+		s.state.Approvals = map[string]ApprovalRequest{}
+	}
+	s.state.Approvals[a.ID] = a
+	return s.persistLocked()
+}
+func (s *FileStore) GetApproval(id string) (*ApprovalRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	a, ok := s.state.Approvals[id]
+	if !ok {
+		return nil, fmt.Errorf("approval %s not found", id)
+	}
+	cp := a
+	return &cp, nil
+}
+func (s *FileStore) ListApprovals(status ApprovalStatus) []ApprovalRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ApprovalRequest, 0, len(s.state.Approvals))
+	for _, v := range s.state.Approvals {
+		if status == "" || v.Status == status {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
+}

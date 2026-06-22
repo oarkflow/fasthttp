@@ -164,6 +164,32 @@ func (s *PostgresStorage) Migrate(ctx context.Context) error {
  updated_at timestamptz NOT NULL,
  data jsonb NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS dagflow_notifications (
+ id text PRIMARY KEY,
+ message_id text NOT NULL,
+ channel_id text NOT NULL,
+ channel text NOT NULL,
+ event text NOT NULL,
+ status text NOT NULL,
+ task_id text NOT NULL DEFAULT '',
+ workflow_id text NOT NULL DEFAULT '',
+ node_id text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL,
+ updated_at timestamptz NOT NULL,
+ data jsonb NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_dagflow_notifications_task ON dagflow_notifications(task_id,created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS dagflow_approvals (
+ id text PRIMARY KEY,
+ task_id text NOT NULL,
+ workflow_id text NOT NULL,
+ node_id text NOT NULL DEFAULT '',
+ status text NOT NULL,
+ created_at timestamptz NOT NULL,
+ updated_at timestamptz NOT NULL,
+ data jsonb NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_dagflow_approvals_status ON dagflow_approvals(status,created_at DESC)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.ExecContext(ctx, st); err != nil {
@@ -544,4 +570,88 @@ func (s *PostgresStorage) WaitJobResult(ctx context.Context, jobID string) (JobR
 func (s *PostgresStorage) RecoverExpiredJobs(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE dagflow_jobs SET status='retry',visible_at=now(),locked_by='',lease_until=NULL,updated_at=now() WHERE status='running' AND lease_until < now()`)
 	return err
+}
+
+func (s *PostgresStorage) SaveNotificationDelivery(d NotificationDelivery) error {
+	if d.ID == "" {
+		d.ID = newID("ntf")
+	}
+	now := time.Now()
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = now
+	}
+	d.UpdatedAt = now
+	if d.Status == "" {
+		d.Status = NotifyPending
+	}
+	_, err := s.db.Exec(`INSERT INTO dagflow_notifications(id,message_id,channel_id,channel,event,status,task_id,workflow_id,node_id,created_at,updated_at,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,data=EXCLUDED.data`, d.ID, d.MessageID, d.ChannelID, string(d.Channel), d.Event, string(d.Status), d.TaskID, d.WorkflowID, d.NodeID, d.CreatedAt, d.UpdatedAt, jsonBytes(d))
+	return err
+}
+func (s *PostgresStorage) ListNotificationDeliveries() []NotificationDelivery {
+	rows, err := s.db.Query(`SELECT data FROM dagflow_notifications ORDER BY created_at DESC LIMIT 1000`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []NotificationDelivery
+	for rows.Next() {
+		var b []byte
+		if rows.Scan(&b) == nil {
+			var d NotificationDelivery
+			if json.Unmarshal(b, &d) == nil {
+				out = append(out, d)
+			}
+		}
+	}
+	return out
+}
+func (s *PostgresStorage) SaveApproval(a ApprovalRequest) error {
+	if a.ID == "" {
+		a.ID = newID("approval")
+	}
+	now := time.Now()
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	a.UpdatedAt = now
+	if a.Status == "" {
+		a.Status = ApprovalPending
+	}
+	_, err := s.db.Exec(`INSERT INTO dagflow_approvals(id,task_id,workflow_id,node_id,status,created_at,updated_at,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,data=EXCLUDED.data`, a.ID, a.TaskID, a.WorkflowID, a.NodeID, string(a.Status), a.CreatedAt, a.UpdatedAt, jsonBytes(a))
+	return err
+}
+func (s *PostgresStorage) GetApproval(id string) (*ApprovalRequest, error) {
+	var b []byte
+	if err := s.db.QueryRow(`SELECT data FROM dagflow_approvals WHERE id=$1`, id).Scan(&b); err != nil {
+		return nil, err
+	}
+	var a ApprovalRequest
+	if err := json.Unmarshal(b, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+func (s *PostgresStorage) ListApprovals(status ApprovalStatus) []ApprovalRequest {
+	q := `SELECT data FROM dagflow_approvals ORDER BY created_at DESC LIMIT 1000`
+	args := []any{}
+	if status != "" {
+		q = `SELECT data FROM dagflow_approvals WHERE status=$1 ORDER BY created_at DESC LIMIT 1000`
+		args = append(args, string(status))
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []ApprovalRequest
+	for rows.Next() {
+		var b []byte
+		if rows.Scan(&b) == nil {
+			var a ApprovalRequest
+			if json.Unmarshal(b, &a) == nil {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
 }

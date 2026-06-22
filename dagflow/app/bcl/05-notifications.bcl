@@ -1,0 +1,14 @@
+notification_channel "ops_log" {
+  type log
+  enabled true
+}
+
+# Generic signed webhook channel. Set endpoint/secret before enabling in production.
+# notification_channel "ops_webhook" {
+#   type webhook
+#   enabled true
+#   endpoint "https://example.com/dagflow/events"
+#   secret "change-me"
+#   retries 3
+#   timeout "5s"
+# }

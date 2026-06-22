@@ -136,6 +136,10 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 	app.Get("/ops/validate", opsGuard(opsValidate(cfg, engine)))
 	app.Get("/ops/metrics", opsGuard(opsMetrics(engine)))
 	app.Get("/ops/outbox", opsGuard(opsOutbox(engine)))
+	app.Get("/ops/notifications", opsGuard(opsNotifications(engine)))
+	app.Get("/ops/approvals", opsGuard(opsApprovals(engine)))
+	app.Post("/ops/approvals/bulk/approve", opsGuard(opsBulkApprove(engine)))
+	app.Post("/ops/approvals/bulk/reject", opsGuard(opsBulkReject(engine)))
 	app.Get("/ops/leases", opsGuard(opsLeases(engine)))
 	app.Get("/ops/workflows", opsGuard(opsWorkflows(engine)))
 	app.Get("/ops/workflows/:id", opsGuard(opsWorkflow(engine)))
@@ -159,8 +163,24 @@ func RegisterOperations(app *fh.App, engine *Engine, cfg *Config, bclRoot ...str
 func listTasks(engine *Engine) fh.HandlerFunc {
 	return func(c *fh.Ctx) error {
 		tasks := engine.Store().List()
+		status := TaskStatus(c.Query("status"))
+		workflowID := c.Query("workflow_id")
+		nodeID := c.Query("node_id")
 		out := make([]TaskActivitySummary, 0, len(tasks))
 		for _, t := range tasks {
+			if status != "" && t.Status != status {
+				continue
+			}
+			if workflowID != "" && t.WorkflowID != workflowID {
+				continue
+			}
+			if nodeID != "" {
+				if t.CurrentNode != nodeID && t.WaitingNodeID != nodeID {
+					if _, ok := t.NodeStates[nodeID]; !ok {
+						continue
+					}
+				}
+			}
 			out = append(out, taskActivitySummary(t))
 		}
 		return writeJSON(c, fh.StatusOK, out)
@@ -260,6 +280,28 @@ func taskOps(engine *Engine) fh.HandlerFunc {
 				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
 			}
 			return writeJSON(c, fh.StatusOK, publicTaskState(t))
+		case "approve":
+			var body struct {
+				Approver string `json:"approver"`
+				Reason   string `json:"reason"`
+			}
+			_ = json.Unmarshal(c.Body(), &body)
+			t, err := engine.ApproveTask(c.Context(), id, body.Approver, body.Reason)
+			if err != nil {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
+		case "reject":
+			var body struct {
+				Approver string `json:"approver"`
+				Reason   string `json:"reason"`
+			}
+			_ = json.Unmarshal(c.Body(), &body)
+			t, err := engine.RejectTask(c.Context(), id, body.Approver, body.Reason)
+			if err != nil {
+				return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": err.Error()})
+			}
+			return writeJSON(c, fh.StatusOK, publicTaskState(t))
 		case "restart":
 			t, err := engine.RestartTask(c.Context(), id)
 			if err != nil {
@@ -321,4 +363,61 @@ func ExitOnCLIError(err error) {
 		log.Fatal(err)
 	}
 	_ = os.Stdout
+}
+
+func opsNotifications(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		st, ok := engine.Store().(NotificationStore)
+		if !ok {
+			return writeJSON(c, fh.StatusOK, []NotificationDelivery{})
+		}
+		return writeJSON(c, fh.StatusOK, st.ListNotificationDeliveries())
+	}
+}
+func opsApprovals(engine *Engine) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		st, ok := engine.Store().(ApprovalStore)
+		if !ok {
+			return writeJSON(c, fh.StatusOK, []ApprovalRequest{})
+		}
+		status := ApprovalStatus(c.Query("status"))
+		return writeJSON(c, fh.StatusOK, st.ListApprovals(status))
+	}
+}
+
+type bulkApprovalBody struct {
+	TaskIDs  []string `json:"task_ids"`
+	Approver string   `json:"approver"`
+	Reason   string   `json:"reason"`
+}
+
+func opsBulkApprove(engine *Engine) fh.HandlerFunc { return bulkApprovalOp(engine, ApprovalApproved) }
+func opsBulkReject(engine *Engine) fh.HandlerFunc  { return bulkApprovalOp(engine, ApprovalRejected) }
+func bulkApprovalOp(engine *Engine, decision ApprovalStatus) fh.HandlerFunc {
+	return func(c *fh.Ctx) error {
+		var body bulkApprovalBody
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return writeJSON(c, fh.StatusBadRequest, map[string]any{"error": "invalid JSON body", "detail": err.Error()})
+		}
+		var tasks []*Task
+		var errs []error
+		if decision == ApprovalApproved {
+			tasks, errs = engine.BulkApproveTasks(c.Context(), body.TaskIDs, body.Approver, body.Reason)
+		} else {
+			tasks, errs = engine.BulkRejectTasks(c.Context(), body.TaskIDs, body.Approver, body.Reason)
+		}
+		out := make([]PublicTaskState, 0, len(tasks))
+		for _, t := range tasks {
+			out = append(out, publicTaskState(t))
+		}
+		errStrings := make([]string, 0, len(errs))
+		for _, err := range errs {
+			errStrings = append(errStrings, err.Error())
+		}
+		status := fh.StatusOK
+		if len(errStrings) > 0 {
+			status = 207
+		}
+		return writeJSON(c, status, map[string]any{"tasks": out, "errors": errStrings})
+	}
 }

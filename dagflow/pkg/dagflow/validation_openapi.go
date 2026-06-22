@@ -7,6 +7,52 @@ import (
 )
 
 func ValidateConfig(cfg *Config, e *Engine) error {
+	channels := map[string]bool{}
+	for _, ch := range cfg.Notifications {
+		if ch.ID == "" {
+			return fmt.Errorf("notification_channel requires id")
+		}
+		if channels[ch.ID] {
+			return fmt.Errorf("duplicate notification_channel %s", ch.ID)
+		}
+		channels[ch.ID] = true
+	}
+	validateNotificationRefs := func(scope string, rules []NotificationRuleConfig) error {
+		for _, r := range rules {
+			for _, ch := range r.Channels {
+				if !channels[ch] {
+					return fmt.Errorf("%s notification %s references missing channel %s", scope, r.ID, ch)
+				}
+			}
+		}
+		return nil
+	}
+	validateTaskRuleRefs := func(scope string, rules []TaskRuleConfig) error {
+		for _, r := range rules {
+			for _, ch := range r.Action.Channels {
+				if !channels[ch] {
+					return fmt.Errorf("%s rule %s references missing channel %s", scope, r.ID, ch)
+				}
+			}
+		}
+		return nil
+	}
+	for _, wc := range cfg.Workflows {
+		if err := validateNotificationRefs("workflow "+wc.ID, wc.Notifications); err != nil {
+			return err
+		}
+		if err := validateTaskRuleRefs("workflow "+wc.ID, wc.Rules); err != nil {
+			return err
+		}
+		for _, nc := range wc.Nodes {
+			if err := validateNotificationRefs("node "+wc.ID+"."+nc.ID, nc.Notifications); err != nil {
+				return err
+			}
+			if err := validateTaskRuleRefs("node "+wc.ID+"."+nc.ID, nc.Rules); err != nil {
+				return err
+			}
+		}
+	}
 	seenRoutes := map[string]RouteConfig{}
 	for _, r := range FlattenRoutes(cfg) {
 		key := strings.ToUpper(r.Method) + " " + normalizeRoutePath(r.Path)

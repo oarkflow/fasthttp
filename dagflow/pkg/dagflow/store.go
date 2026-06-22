@@ -22,14 +22,16 @@ type TaskStore interface {
 }
 
 type MemoryTaskStore struct {
-	mu          sync.RWMutex
-	tasks       map[string]*Task
-	idempotency map[string]IdempotencyRecord
-	dlq         map[string]DLQItem
+	mu            sync.RWMutex
+	tasks         map[string]*Task
+	idempotency   map[string]IdempotencyRecord
+	dlq           map[string]DLQItem
+	notifications map[string]NotificationDelivery
+	approvals     map[string]ApprovalRequest
 }
 
 func NewMemoryTaskStore() *MemoryTaskStore {
-	return &MemoryTaskStore{tasks: map[string]*Task{}, idempotency: map[string]IdempotencyRecord{}, dlq: map[string]DLQItem{}}
+	return &MemoryTaskStore{tasks: map[string]*Task{}, idempotency: map[string]IdempotencyRecord{}, dlq: map[string]DLQItem{}, notifications: map[string]NotificationDelivery{}, approvals: map[string]ApprovalRequest{}}
 }
 func (s *MemoryTaskStore) Create(t *Task) error { return s.Save(t) }
 func (s *MemoryTaskStore) Save(t *Task) error {
@@ -161,4 +163,55 @@ func cloneChainRun(r *ChainRun) *ChainRun {
 	b, _ := json.Marshal(r)
 	_ = json.Unmarshal(b, &cp)
 	return &cp
+}
+
+func (s *MemoryTaskStore) SaveNotificationDelivery(d NotificationDelivery) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.notifications == nil {
+		s.notifications = map[string]NotificationDelivery{}
+	}
+	s.notifications[d.ID] = d
+	return nil
+}
+func (s *MemoryTaskStore) ListNotificationDeliveries() []NotificationDelivery {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]NotificationDelivery, 0, len(s.notifications))
+	for _, v := range s.notifications {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
+}
+func (s *MemoryTaskStore) SaveApproval(a ApprovalRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.approvals == nil {
+		s.approvals = map[string]ApprovalRequest{}
+	}
+	s.approvals[a.ID] = a
+	return nil
+}
+func (s *MemoryTaskStore) GetApproval(id string) (*ApprovalRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	a, ok := s.approvals[id]
+	if !ok {
+		return nil, fmt.Errorf("approval %s not found", id)
+	}
+	cp := a
+	return &cp, nil
+}
+func (s *MemoryTaskStore) ListApprovals(status ApprovalStatus) []ApprovalRequest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ApprovalRequest, 0, len(s.approvals))
+	for _, v := range s.approvals {
+		if status == "" || v.Status == status {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
 }

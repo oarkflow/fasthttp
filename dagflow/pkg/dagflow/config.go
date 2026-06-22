@@ -16,16 +16,17 @@ import (
 )
 
 type Config struct {
-	Server            ServerConfig       `bcl:"server,block,omitempty"`
-	GlobalMiddlewares []string           `bcl:"global_middlewares,omitempty"`
-	Conditions        []ConditionConfig  `bcl:"condition,block"`
-	Middlewares       []MiddlewareConfig `bcl:"middleware,block"`
-	Workflows         []WorkflowConfig   `bcl:"workflow,block"`
-	Chains            []ChainConfig      `bcl:"chain,block"`
-	Routes            []RouteConfig      `bcl:"route,block"`
-	RouteGroups       []RouteGroupConfig `bcl:"route_group,block"`
-	Schemas           []SchemaConfig     `bcl:"schema,block"`
-	Scripts           []ScriptConfig     `bcl:"script,block"`
+	Server            ServerConfig                `bcl:"server,block,omitempty"`
+	GlobalMiddlewares []string                    `bcl:"global_middlewares,omitempty"`
+	Conditions        []ConditionConfig           `bcl:"condition,block"`
+	Middlewares       []MiddlewareConfig          `bcl:"middleware,block"`
+	Workflows         []WorkflowConfig            `bcl:"workflow,block"`
+	Chains            []ChainConfig               `bcl:"chain,block"`
+	Routes            []RouteConfig               `bcl:"route,block"`
+	RouteGroups       []RouteGroupConfig          `bcl:"route_group,block"`
+	Schemas           []SchemaConfig              `bcl:"schema,block"`
+	Scripts           []ScriptConfig              `bcl:"script,block"`
+	Notifications     []NotificationChannelConfig `bcl:"notification_channel,block"`
 }
 
 type ServerConfig struct {
@@ -67,50 +68,54 @@ type MiddlewareConfig struct {
 }
 
 type WorkflowConfig struct {
-	ID              string                  `bcl:",id"`
-	Name            string                  `bcl:"name,omitempty"`
-	Version         string                  `bcl:"version,omitempty"`
-	First           string                  `bcl:"first"`
-	Debug           bool                    `bcl:"debug,omitempty"`
-	MaxVisits       int                     `bcl:"max_visits,omitempty"`
-	Mode            RunMode                 `bcl:"mode,ident,omitempty"`
-	MigrationPolicy WorkflowMigrationPolicy `bcl:"migration_policy,ident,omitempty"`
-	InputData       DataConfig              `bcl:"input_data,block,omitempty"`
-	OutputData      DataConfig              `bcl:"output_data,block,omitempty"`
-	Nodes           []NodeConfig            `bcl:"node,block"`
-	Edges           []EdgeConfig            `bcl:"edge,block"`
+	ID              string                   `bcl:",id"`
+	Name            string                   `bcl:"name,omitempty"`
+	Version         string                   `bcl:"version,omitempty"`
+	First           string                   `bcl:"first"`
+	Debug           bool                     `bcl:"debug,omitempty"`
+	MaxVisits       int                      `bcl:"max_visits,omitempty"`
+	Mode            RunMode                  `bcl:"mode,ident,omitempty"`
+	MigrationPolicy WorkflowMigrationPolicy  `bcl:"migration_policy,ident,omitempty"`
+	InputData       DataConfig               `bcl:"input_data,block,omitempty"`
+	OutputData      DataConfig               `bcl:"output_data,block,omitempty"`
+	Notifications   []NotificationRuleConfig `bcl:"notification,block"`
+	Rules           []TaskRuleConfig         `bcl:"rule,block"`
+	Nodes           []NodeConfig             `bcl:"node,block"`
+	Edges           []EdgeConfig             `bcl:"edge,block"`
 }
 
 type NodeConfig struct {
-	ID              string               `bcl:",id"`
-	Type            NodeType             `bcl:"type,ident"`
-	Handler         string               `bcl:"handler,omitempty"`
-	Workflow        string               `bcl:"workflow,omitempty"`
-	Mode            RunMode              `bcl:"mode,ident,omitempty"`
-	Await           *bool                `bcl:"await,omitempty"`
-	Timeout         string               `bcl:"timeout,omitempty"`
-	Retry           int                  `bcl:"retry,omitempty"`
-	RetryPolicy     RetryPolicyConfig    `bcl:"retry_policy,block,omitempty"`
-	Last            bool                 `bcl:"last,omitempty"`
-	Pause           bool                 `bcl:"pause,omitempty"`
-	When            string               `bcl:"when,omitempty"`
-	Condition       string               `bcl:"condition,omitempty"`
-	SkipOnFalse     bool                 `bcl:"skip_on_false,omitempty"`
-	ContinueOnError bool                 `bcl:"continue_on_error,omitempty"`
-	Compensate      string               `bcl:"compensate,omitempty"`
-	OnError         string               `bcl:"on_error,omitempty"`
-	OnTimeout       string               `bcl:"on_timeout,omitempty"`
-	Pool            string               `bcl:"pool,omitempty"`
-	Priority        int                  `bcl:"priority,omitempty"`
-	RateLimit       RateLimitConfig      `bcl:"rate_limit,block,omitempty"`
-	CircuitBreaker  CircuitBreakerConfig `bcl:"circuit_breaker,block,omitempty"`
-	Params          map[string]any       `bcl:"params,omitempty"`
-	Script          string               `bcl:"script,omitempty"`
-	InputSchema     string               `bcl:"input_schema,omitempty"`
-	OutputSchema    string               `bcl:"output_schema,omitempty"`
-	FailurePolicy   FailurePolicyConfig  `bcl:"failure_policy,block,omitempty"`
-	InputData       DataConfig           `bcl:"input_data,block,omitempty"`
-	OutputData      DataConfig           `bcl:"output_data,block,omitempty"`
+	ID              string                   `bcl:",id"`
+	Type            NodeType                 `bcl:"type,ident"`
+	Handler         string                   `bcl:"handler,omitempty"`
+	Workflow        string                   `bcl:"workflow,omitempty"`
+	Mode            RunMode                  `bcl:"mode,ident,omitempty"`
+	Await           *bool                    `bcl:"await,omitempty"`
+	Timeout         string                   `bcl:"timeout,omitempty"`
+	Retry           int                      `bcl:"retry,omitempty"`
+	RetryPolicy     RetryPolicyConfig        `bcl:"retry_policy,block,omitempty"`
+	Last            bool                     `bcl:"last,omitempty"`
+	Pause           bool                     `bcl:"pause,omitempty"`
+	When            string                   `bcl:"when,omitempty"`
+	Condition       string                   `bcl:"condition,omitempty"`
+	SkipOnFalse     bool                     `bcl:"skip_on_false,omitempty"`
+	ContinueOnError bool                     `bcl:"continue_on_error,omitempty"`
+	Compensate      string                   `bcl:"compensate,omitempty"`
+	OnError         string                   `bcl:"on_error,omitempty"`
+	OnTimeout       string                   `bcl:"on_timeout,omitempty"`
+	Pool            string                   `bcl:"pool,omitempty"`
+	Priority        int                      `bcl:"priority,omitempty"`
+	RateLimit       RateLimitConfig          `bcl:"rate_limit,block,omitempty"`
+	CircuitBreaker  CircuitBreakerConfig     `bcl:"circuit_breaker,block,omitempty"`
+	Params          map[string]any           `bcl:"params,omitempty"`
+	Script          string                   `bcl:"script,omitempty"`
+	InputSchema     string                   `bcl:"input_schema,omitempty"`
+	OutputSchema    string                   `bcl:"output_schema,omitempty"`
+	FailurePolicy   FailurePolicyConfig      `bcl:"failure_policy,block,omitempty"`
+	InputData       DataConfig               `bcl:"input_data,block,omitempty"`
+	OutputData      DataConfig               `bcl:"output_data,block,omitempty"`
+	Notifications   []NotificationRuleConfig `bcl:"notification,block"`
+	Rules           []TaskRuleConfig         `bcl:"rule,block"`
 }
 
 type RetryPolicyConfig struct {
@@ -180,6 +185,33 @@ type DataTransformConfig struct {
 type DataFilterConfig struct {
 	Expr string `bcl:"expr,omitempty" json:"expr,omitempty"`
 	Mode string `bcl:"mode,ident,omitempty" json:"mode,omitempty"`
+}
+
+type NotificationChannelConfig = NotificationChannel
+
+type NotificationRuleConfig struct {
+	ID        string            `bcl:",id" json:"id"`
+	Enabled   *bool             `bcl:"enabled,omitempty" json:"enabled,omitempty"`
+	Events    []string          `bcl:"events,omitempty" json:"events,omitempty"`
+	Channels  []string          `bcl:"channels,omitempty" json:"channels,omitempty"`
+	When      string            `bcl:"when,omitempty" json:"when,omitempty"`
+	Condition string            `bcl:"condition,omitempty" json:"condition,omitempty"`
+	Title     string            `bcl:"title,omitempty" json:"title,omitempty"`
+	Message   string            `bcl:"message,omitempty" json:"message,omitempty"`
+	Severity  string            `bcl:"severity,omitempty" json:"severity,omitempty"`
+	Data      DataConfig        `bcl:"data,block,omitempty" json:"data,omitempty"`
+	Headers   map[string]string `bcl:"headers,omitempty" json:"headers,omitempty"`
+}
+
+type TaskRuleConfig struct {
+	ID        string           `bcl:",id" json:"id"`
+	Enabled   *bool            `bcl:"enabled,omitempty" json:"enabled,omitempty"`
+	Events    []string         `bcl:"events,omitempty" json:"events,omitempty"`
+	When      string           `bcl:"when,omitempty" json:"when,omitempty"`
+	Condition string           `bcl:"condition,omitempty" json:"condition,omitempty"`
+	Action    TaskActionConfig `bcl:"action,block" json:"action"`
+	Message   string           `bcl:"message,omitempty" json:"message,omitempty"`
+	Data      DataConfig       `bcl:"data,block,omitempty" json:"data,omitempty"`
 }
 
 type ChainConfig struct {
@@ -331,6 +363,7 @@ func mergeConfig(dst, src *Config) {
 	dst.RouteGroups = append(dst.RouteGroups, src.RouteGroups...)
 	dst.Schemas = append(dst.Schemas, src.Schemas...)
 	dst.Scripts = append(dst.Scripts, src.Scripts...)
+	dst.Notifications = append(dst.Notifications, src.Notifications...)
 }
 
 func decodeBCL(data []byte) (*Config, error) {
@@ -512,6 +545,14 @@ func buildChain(c ChainConfig) *Chain {
 	return &Chain{ID: c.ID, Name: c.Name, Workflows: append([]string(nil), c.Workflows...), Debug: c.Debug, When: c.When, Condition: c.Condition}
 }
 
+func buildNotificationRule(c NotificationRuleConfig) NotificationRule {
+	return NotificationRule{ID: c.ID, Enabled: c.Enabled, Events: append([]string(nil), c.Events...), Channels: append([]string(nil), c.Channels...), When: c.When, Condition: c.Condition, Title: c.Title, Message: c.Message, Severity: c.Severity, Data: buildDataSpec(c.Data), Headers: c.Headers}
+}
+
+func buildTaskRule(c TaskRuleConfig) TaskRule {
+	return TaskRule{ID: c.ID, Enabled: c.Enabled, Events: append([]string(nil), c.Events...), When: c.When, Condition: c.Condition, Action: c.Action, Message: c.Message, Data: buildDataSpec(c.Data)}
+}
+
 func buildDataSpec(c DataConfig) DataSpec {
 	out := DataSpec{Source: c.Source, Map: c.Map, Set: c.Set, Defaults: c.Defaults, Env: c.Env, Services: c.Services, Integrations: c.Integrations, Pick: append([]string(nil), c.Pick...), Omit: append([]string(nil), c.Omit...), Rename: c.Rename, Append: c.Append, Prepend: c.Prepend, Flatten: append([]string(nil), c.Flatten...), Strict: c.Strict}
 	for _, tr := range c.Transforms {
@@ -533,6 +574,12 @@ func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 	wf := &Workflow{ID: c.ID, Name: c.Name, Version: c.Version, First: c.First, Debug: c.Debug, MaxVisits: c.MaxVisits, Mode: c.Mode, InputData: buildDataSpec(c.InputData), OutputData: buildDataSpec(c.OutputData), MigrationPolicy: c.MigrationPolicy, Nodes: map[string]*Node{}, Outgoing: map[string][]*Edge{}, Incoming: map[string][]*Edge{}, FanIn: map[string][]*Edge{}, Metadata: map[string]any{}}
 	if wf.MaxVisits <= 0 {
 		wf.MaxVisits = 256
+	}
+	for _, nr := range c.Notifications {
+		wf.Notifications = append(wf.Notifications, buildNotificationRule(nr))
+	}
+	for _, r := range c.Rules {
+		wf.Rules = append(wf.Rules, buildTaskRule(r))
 	}
 	for _, nc := range c.Nodes {
 		if nc.ID == "" {
@@ -594,6 +641,12 @@ func buildWorkflow(c WorkflowConfig) (*Workflow, error) {
 			cb = &CircuitBreakerPolicy{FailureThreshold: nc.CircuitBreaker.FailureThreshold, ResetAfter: rd}
 		}
 		wf.Nodes[nc.ID] = &Node{ID: nc.ID, Type: nc.Type, Handler: nc.Handler, Workflow: nc.Workflow, Mode: nc.Mode, Await: await, Timeout: d, Retry: nc.Retry, RetryPolicy: rp, Last: nc.Last, Pause: nc.Pause, When: nc.When, Condition: nc.Condition, SkipOnFalse: nc.SkipOnFalse, ContinueOnError: nc.ContinueOnError, Compensate: nc.Compensate, OnError: nc.OnError, OnTimeout: nc.OnTimeout, Pool: nc.Pool, Priority: nc.Priority, RateLimit: rl, CircuitBreaker: cb, Params: nc.Params, Script: nc.Script, InputSchema: nc.InputSchema, OutputSchema: nc.OutputSchema, FailurePolicy: FailurePolicy{Strategy: nc.FailurePolicy.Strategy, ErrorNode: nc.FailurePolicy.ErrorNode, FallbackNode: nc.FailurePolicy.FallbackNode}, InputData: buildDataSpec(nc.InputData), OutputData: buildDataSpec(nc.OutputData)}
+		for _, nr := range nc.Notifications {
+			wf.Nodes[nc.ID].Notifications = append(wf.Nodes[nc.ID].Notifications, buildNotificationRule(nr))
+		}
+		for _, r := range nc.Rules {
+			wf.Nodes[nc.ID].Rules = append(wf.Nodes[nc.ID].Rules, buildTaskRule(r))
+		}
 	}
 	if wf.Nodes[wf.First] == nil {
 		return nil, fmt.Errorf("workflow %s first node %s not found", c.ID, c.First)

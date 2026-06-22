@@ -28,6 +28,7 @@ type Engine struct {
 	local          *LocalQueue
 	broker         Broker
 	activityLog    chan AuditEvent
+	notifier       *NotificationDispatcher
 }
 
 func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
@@ -40,7 +41,7 @@ func NewEngine(store TaskStore, chainStore ChainStore, broker Broker) *Engine {
 	if broker == nil {
 		broker = NewMemoryBroker()
 	}
-	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, dataSources: map[string]DataSourceFunc{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker, activityLog: make(chan AuditEvent, 4096)}
+	e := &Engine{flows: map[string]*Workflow{}, chains: map[string]*Chain{}, conditions: map[string]ConditionSpec{}, schemas: map[string]SchemaDef{}, snapshots: map[string][]WorkflowSnapshot{}, handlers: map[string]Handler{}, scriptHandlers: map[string]string{}, dataSources: map[string]DataSourceFunc{}, metrics: NewMetricsRegistry(), store: store, chainStore: chainStore, broker: broker, activityLog: make(chan AuditEvent, 4096), notifier: NewNotificationDispatcher()}
 	e.startActivityLogger()
 	e.local = NewLocalQueue(e, 8)
 	e.runtime = NewScriptRuntime(e)
@@ -52,6 +53,31 @@ func (e *Engine) Register(name string, h Handler) {
 	defer e.mu.Unlock()
 	e.handlers[name] = h
 }
+func (e *Engine) Notifier() *NotificationDispatcher {
+	return e.notifier
+}
+
+func (e *Engine) RegisterNotificationCallback(channelID string, cb NotificationCallback) {
+	if e.notifier == nil {
+		e.notifier = NewNotificationDispatcher()
+	}
+	e.notifier.RegisterCallback(channelID, cb)
+}
+
+func (e *Engine) RegisterNotificationHandler(t NotificationChannelType, h NotificationHandler) {
+	if e.notifier == nil {
+		e.notifier = NewNotificationDispatcher()
+	}
+	e.notifier.RegisterHandler(t, h)
+}
+
+func (e *Engine) RegisterNotificationChannel(ch NotificationChannel) error {
+	if e.notifier == nil {
+		e.notifier = NewNotificationDispatcher()
+	}
+	return e.notifier.RegisterChannel(ch)
+}
+
 func (e *Engine) OnFinal(cb FinalCallback) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -61,6 +87,11 @@ func (e *Engine) Store() TaskStore       { return e.store }
 func (e *Engine) ChainStore() ChainStore { return e.chainStore }
 
 func (e *Engine) LoadConfig(cfg *Config) error {
+	for _, nc := range cfg.Notifications {
+		if err := e.RegisterNotificationChannel(NotificationChannel(nc)); err != nil {
+			return err
+		}
+	}
 	for _, sc := range cfg.Schemas {
 		if err := e.AddSchema(buildSchema(sc)); err != nil {
 			return err
@@ -194,6 +225,10 @@ func (e *Engine) RunSync(ctx context.Context, workflowID string, input any) (*Ta
 	task.DefinitionHash = wf.Hash
 	e.metrics.Inc("workflow_started_total")
 	e.audit(task, "task.created", "task created", map[string]any{"input": Redact(input)})
+	if err := e.applyTaskRules(ctx, wf, task, nil, "task.created", input); err != nil {
+		e.finishTask(task, err)
+		return task, err
+	}
 	if err := e.store.Create(task); err != nil {
 		return nil, err
 	}
@@ -218,6 +253,10 @@ func (e *Engine) RunAsync(ctx context.Context, workflowID string, input any) (*T
 	task.DefinitionHash = wf.Hash
 	e.metrics.Inc("workflow_started_total")
 	e.audit(task, "task.created", "async task created", map[string]any{"input": Redact(input)})
+	if err := e.applyTaskRules(ctx, wf, task, nil, "task.created", input); err != nil {
+		e.finishTask(task, err)
+		return task, err
+	}
 	if err := e.store.Create(task); err != nil {
 		return nil, err
 	}
@@ -376,6 +415,19 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 			}
 		}
 		nodeInput, derr := e.applyNodeInput(ctx, wf, task, node, item.Input)
+		if derr == nil {
+			resumeQueue := append([]RunItem{{NodeID: node.ID, Input: nodeInput, From: item.From, EdgeID: item.EdgeID}}, queue...)
+			task.Cursor = resumeQueue
+			if rerr := e.applyTaskRules(ctx, wf, task, node, "node.before", nodeInput); rerr != nil {
+				if errors.Is(rerr, ErrApprovalRequired) {
+					task.Cursor = resumeQueue
+					_ = e.store.Save(task)
+					return nil
+				}
+				return rerr
+			}
+			task.Cursor = queue
+		}
 		if derr != nil {
 			if errors.Is(derr, ErrDataFiltered) {
 				e.markSkipped(task, node, item.Input)
@@ -414,6 +466,13 @@ func (e *Engine) executeTask(ctx context.Context, wf *Workflow, task *Task, queu
 		}
 		if st := task.NodeStates[node.ID]; st != nil {
 			st.Result = result
+		}
+		if rerr := e.applyTaskRules(ctx, wf, task, node, "node.completed", result); rerr != nil {
+			if errors.Is(rerr, ErrApprovalRequired) {
+				_ = e.store.Save(task)
+				return nil
+			}
+			return rerr
 		}
 		task.PreviousNode = node.ID
 		task.PreviousNodes = append(task.PreviousNodes, node.ID)
@@ -813,6 +872,7 @@ func (e *Engine) audit(task *Task, event, message string, data map[string]any) {
 	default:
 		// Never block workflow execution because an audit log sink is congested.
 	}
+	e.emitAuditNotifications(context.Background(), task, ev)
 }
 
 func (e *Engine) applyWorkflowInput(ctx context.Context, wf *Workflow, input any) (any, error) {
@@ -858,6 +918,9 @@ func (e *Engine) finishTask(task *Task, err error) {
 		done := time.Now()
 		task.CompletedAt = &done
 		e.audit(task, "task.completed", "task completed", map[string]any{"result": task.Result})
+	}
+	if wf, werr := e.workflow(task.WorkflowID); werr == nil {
+		_ = e.applyTaskRules(context.Background(), wf, task, nil, "task."+string(task.Status), task.Result)
 	}
 	task.UpdatedAt = time.Now()
 	_ = e.store.Save(task)

@@ -1929,3 +1929,180 @@ go run . validate app/bcl
 The validation command now fails fast for route-level `input_schema` and `output_schema` references, not only node-level schema references. That means a missing `EmailRequest`, `OrderCheckRequest`, or any future route schema is caught at startup instead of during the first request.
 
 The request envelope mapper was also fixed so route data expressions like `body.to`, `path.order_id`, `query.source`, and `headers.X-Request-ID` resolve against the actual HTTP request envelope used by curl examples.
+
+---
+
+## Notifications, filters, and approvals
+
+This build adds first-class workflow and node policies for enterprise notifications, task filtering, rejection, approval, and manual gates. The core remains generic: channels, rules, approval records, and delivery records live in `pkg/dagflow`, while business-specific handlers stay in `app`.
+
+### Notification channels
+
+Notification channels are globally configured in BCL and can be reused by any workflow or node.
+
+```bcl
+notification_channel "ops_log" {
+  type log
+  enabled true
+}
+
+notification_channel "ops_webhook" {
+  type webhook
+  enabled true
+  endpoint "https://example.com/dagflow/events"
+  secret "change-me"
+  retries 3
+  timeout "5s"
+}
+```
+
+Built-in channel types:
+
+- `log`: local structured process log.
+- `callback`: custom Go callback channel via `RegisterNotificationHandler`.
+- `webhook`: signed JSON HTTP delivery with `X-Dagflow-Signature`.
+- `email`: SMTP delivery using configured host, port, sender, recipients, and credentials.
+- `sms`: generic signed HTTP SMS provider adapter, so the core is vendor-neutral and can work with Twilio-compatible gateways, local SMS gateways, or an internal notification service.
+
+Custom future channels are added without changing workflow execution:
+
+```go
+engine.RegisterNotificationHandler("slack", dagflow.NotificationHandlerFunc(
+    func(ctx context.Context, ch dagflow.NotificationChannel, msg dagflow.NotificationMessage) error {
+        // Deliver to any provider here.
+        return nil
+    },
+))
+```
+
+### Workflow and node notification rules
+
+Rules can be attached to a workflow or a specific node. They match lifecycle events, optionally evaluate a BCL condition, optionally reshape data with `data`, and deliver to one or more channels.
+
+```bcl
+workflow "notification_approval_demo" {
+  first "receive"
+
+  notification "workflow_activity" {
+    events ["task.created", "task.completed", "task.failed", "approval.required"]
+    channels ["ops_log"]
+    title "DAGFlow {{event}}"
+    message "workflow={{task.workflow_id}} task={{task.id}} status={{task.status}}"
+    severity "info"
+  }
+
+  node "send" {
+    type function
+    handler "send_email"
+
+    notification "send_completed" {
+      events ["node.completed"]
+      channels ["ops_log"]
+      title "Email send node completed"
+      message "task={{task.id}} node={{node.id}}"
+    }
+  }
+}
+```
+
+Notification deliveries are persisted by stores that implement `NotificationStore`; the memory, file, and Postgres stores now do. Inspect deliveries at:
+
+```bash
+curl -s -H 'X-Admin-Token: change-this-admin-token' localhost:8080/ops/notifications | jq
+```
+
+### Task rules: filters, rejection, and manual approval
+
+Task rules can be attached to a workflow or node. They run on configured lifecycle events and can notify, reject, auto-approve, pause, cancel, or require manual approval.
+
+```bcl
+node "send" {
+  type function
+  handler "send_email"
+
+  rule "manual_approval_for_sensitive_subject" {
+    events ["node.before"]
+    when `input.request.subject == "approval" || input.request.subject == "sensitive"`
+    message "manual approval required before sending sensitive email"
+    action {
+      type require_approval
+      mode single
+      approvers ["ops"]
+      reason "sensitive email requires approval"
+      channels ["ops_log"]
+      timeout "24h"
+    }
+  }
+}
+```
+
+Rule action types:
+
+- `notify`: emits a notification only.
+- `reject`: fails the task with the configured reason.
+- `approve`: records an automatic approval audit event.
+- `require_approval`: pauses the task, saves an approval request, and resumes only after approval.
+- `pause`: pauses execution.
+- `cancel`: cancels execution.
+
+Approval records are persisted by stores that implement `ApprovalStore`; the memory, file, and Postgres stores now do.
+
+### Approval operations
+
+List pending approvals:
+
+```bash
+curl -s -H 'X-Admin-Token: change-this-admin-token' \
+  'localhost:8080/ops/approvals?status=pending' | jq
+```
+
+Approve or reject a single task:
+
+```bash
+curl -s -X POST localhost:8080/ops/tasks/<task-id>/approve \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-admin-token' \
+  -d '{"approver":"ops","reason":"approved"}' | jq
+
+curl -s -X POST localhost:8080/ops/tasks/<task-id>/reject \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-admin-token' \
+  -d '{"approver":"ops","reason":"rejected"}' | jq
+```
+
+Bulk approve or reject:
+
+```bash
+curl -s -X POST localhost:8080/ops/approvals/bulk/approve \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-admin-token' \
+  -d '{"task_ids":["task_1","task_2"],"approver":"ops","reason":"bulk approved"}' | jq
+```
+
+### Demo workflow
+
+`app/bcl/20-workflows/notification_approval_demo.bcl` demonstrates workflow-level notifications, node-level notifications, a rule-based rejection, and a manual approval gate.
+
+Run a normal request:
+
+```bash
+curl -s -X POST localhost:8080/workflow/notification_approval_demo \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"a@b.com","subject":"Hi","body":"Hello"}' | jq
+```
+
+Trigger manual approval:
+
+```bash
+curl -s -X POST localhost:8080/workflow/notification_approval_demo \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"a@b.com","subject":"approval","body":"Please approve"}' | jq
+```
+
+Trigger rule rejection:
+
+```bash
+curl -s -X POST localhost:8080/workflow/notification_approval_demo \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"blocked@blocked.test","subject":"Hi","body":"Blocked"}' | jq
+```

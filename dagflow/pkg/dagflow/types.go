@@ -94,6 +94,8 @@ type Workflow struct {
 	InputData       DataSpec
 	OutputData      DataSpec
 	MigrationPolicy WorkflowMigrationPolicy
+	Notifications   []NotificationRule
+	Rules           []TaskRule
 }
 
 type Node struct {
@@ -126,6 +128,8 @@ type Node struct {
 	FailurePolicy   FailurePolicy
 	InputData       DataSpec
 	OutputData      DataSpec
+	Notifications   []NotificationRule
+	Rules           []TaskRule
 }
 
 type Edge struct {

@@ -97,6 +97,25 @@ route_group "api" {
       }
     }
 
+
+
+    route "notification_approval_demo" {
+      method "POST"
+      path "/notification-approval-demo"
+      workflow "notification_approval_demo"
+      mode sync
+      input_schema "EmailRequest"
+      envelope true
+
+      data {
+        map {
+          to "body.to"
+          subject "body.subject"
+          body "body.body"
+        }
+      }
+    }
+
     route "send_and_audit" {
       method "POST"
       path "/send-and-audit"

@@ -1,0 +1,95 @@
+workflow "notification_approval_demo" {
+  name "Notification and Approval Demo"
+  version "1.0.0"
+  first "receive"
+  max_visits 64
+  debug true
+
+  notification "workflow_activity" {
+    events ["task.created", "task.completed", "task.failed", "approval.required", "approval.approved", "approval.rejected"]
+    channels ["ops_log"]
+    title "DAGFlow {{event}}"
+    message "workflow={{task.workflow_id}} task={{task.id}} status={{task.status}}"
+    severity "info"
+  }
+
+  rule "reject_blocked_domain" {
+    events ["node.before"]
+    when `node.id == "validate" && input.to == "blocked@blocked.test"`
+    message "recipient domain is blocked"
+    action {
+      type reject
+      reason "blocked recipient domain"
+      channels ["ops_log"]
+    }
+  }
+
+  node "receive" {
+    type function
+    handler "receive_email"
+  }
+
+  node "validate" {
+    type function
+    handler "validate_email"
+  }
+
+  node "send" {
+    type function
+    handler "send_email"
+
+    rule "manual_approval_for_sensitive_subject" {
+      events ["node.before"]
+      when `input.request.subject == "approval" || input.request.subject == "sensitive"`
+      message "manual approval required before sending sensitive email"
+      action {
+        type require_approval
+        mode single
+        approvers ["ops"]
+        reason "sensitive email requires approval"
+        channels ["ops_log"]
+        timeout "24h"
+      }
+    }
+
+    notification "send_completed" {
+      events ["node.completed"]
+      channels ["ops_log"]
+      title "Email send node completed"
+      message "task={{task.id}} node={{node.id}}"
+      severity "info"
+    }
+  }
+
+  node "store" {
+    type function
+    handler "store_message"
+    last true
+  }
+
+  edge "receive_to_validate" {
+    from "receive"
+    to "validate"
+    type simple
+  }
+
+  edge "valid_to_send" {
+    from "validate"
+    to "send"
+    type branch
+    when `result.valid == true`
+  }
+
+  edge "invalid_to_store" {
+    from "validate"
+    to "store"
+    type branch
+    when `result.valid == false`
+  }
+
+  edge "send_to_store" {
+    from "send"
+    to "store"
+    type simple
+  }
+}
