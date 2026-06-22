@@ -520,3 +520,73 @@ Full working examples in `examples/`:
 | `sink` | Comprehensive: sessions, all methods, groups, codecs, streaming, WebSocket |
 | `websocket` | Event-driven WebSocket with EventHub (auth, topics, channels, heartbeat) |
 | `fiber` | Comparative example using `gofiber/fiber/v3` |
+
+## Built-in reliability layer
+
+`fh` includes an optional stdlib-only reliability runtime for applications that must safely handle request-response workflows and durable asynchronous work without adding an external queue dependency.
+
+Enable it from application configuration:
+
+```go
+app := fh.New(fh.Config{
+    Reliability: fh.ReliabilityConfig{
+        Enabled:            true,
+        DataDir:            ".fh-data",
+        JournalEnabled:     true,
+        IdempotencyEnabled: true,
+        QueueEnabled:       true,
+        QueueWorkers:       2,
+        QueueMaxAttempts:   5,
+    },
+})
+```
+
+What it provides:
+
+- `X-Request-ID` generation and propagation for every request.
+- Durable request-cycle journal in JSONL format: `received` and `completed` events with method, path, status, body hash, remote IP, and timestamp.
+- Idempotency support for unsafe methods (`POST`, `PUT`, `PATCH`, `DELETE`) using `Idempotency-Key`.
+- Safe replay of completed idempotent responses.
+- Conflict protection when the same idempotency key is reused with a different payload.
+- Embedded durable queue with pending/processing/done/failed directories, crash recovery, retries, backoff, worker registration, and an append-only `queue/events.jsonl` audit trail.
+- Clean shutdown through the existing application lifecycle.
+
+Example retry-safe request:
+
+```bash
+curl -i -X POST http://localhost:3000/orders \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-create-001' \
+  -d '{"item":"book"}'
+```
+
+Running the reliability example:
+
+```bash
+cd examples/reliability
+go run . -addr :3000 -reliable=true -data .fh-data -queue-workers 2
+```
+
+Queue example:
+
+```bash
+curl -i -X POST http://localhost:3000/email \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: email-001' \
+  -d '{"to":"user@example.com","subject":"Hello","message":"Queued safely"}'
+
+curl http://localhost:3000/queue/stats
+
+# Inspect durable queue state and activity. With active workers, pending can be
+# empty because jobs may move to done almost immediately.
+find .fh-data/queue -maxdepth 2 -type f -print
+cat .fh-data/queue/events.jsonl
+```
+
+Reliability model:
+
+- The server never reports durable acceptance for async work until the job is written to disk.
+- Queue jobs are at-least-once, so external side effects should use the queue job ID as their own idempotency key.
+- If a process crashes with jobs in `processing`, they are moved back to `pending` on restart.
+- `queue/events.jsonl` records enqueue, claim, retry, completion, failure, and recovery events so queue activity remains visible even when workers process jobs immediately.
+- If a client times out after the server completed a request, retrying with the same `Idempotency-Key` returns the stored response instead of duplicating the operation.

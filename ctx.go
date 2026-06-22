@@ -80,6 +80,7 @@ type Ctx struct {
 	upgradeBuffered  []byte
 	trailers         []Header
 	responseTrailers []Header
+	responseSnapshot []byte
 	requestContext   context.Context
 	originalURI      []byte
 	bodyTransform    func([]byte) ([]byte, error)
@@ -161,6 +162,7 @@ func (c *Ctx) reset() {
 	c.trailers = c.trailers[:0]
 	clear(c.responseTrailers)
 	c.responseTrailers = c.responseTrailers[:0]
+	c.responseSnapshot = c.responseSnapshot[:0]
 	c.requestContext = context.Background()
 	c.originalURI = c.originalURI[:0]
 	c.bodyTransform = nil
@@ -362,6 +364,16 @@ func (c *Ctx) parseQuery() {
 }
 
 func (c *Ctx) Body() []byte { return c.body }
+
+// BodyCopy returns a stable copy of the request body. Use it when data must outlive the handler.
+func (c *Ctx) BodyCopy() []byte {
+	if len(c.body) == 0 {
+		return nil
+	}
+	out := make([]byte, len(c.body))
+	copy(out, c.body)
+	return out
+}
 
 // BodyRaw is the Fiber-compatible name for the unmodified request body.
 func (c *Ctx) BodyRaw() []byte { return c.body }
@@ -600,6 +612,10 @@ func headerValueContainsToken(header []byte, token string) bool { return hasHead
 // Responded reports whether response headers have already been written.
 func (c *Ctx) Responded() bool { return c.responded }
 
+// ResponseBody returns the buffered response body snapshot for middleware hooks.
+// It is valid only during the current request cycle.
+func (c *Ctx) ResponseBody() []byte { return c.responseSnapshot }
+
 func (c *Ctx) Type(mime string) *Ctx {
 	if strings.ContainsAny(mime, "\x00\r\n") {
 		return c
@@ -765,6 +781,7 @@ func (c *Ctx) writeResponseString(s string) error {
 	if c.responded {
 		return nil
 	}
+	c.responseSnapshot = append(c.responseSnapshot[:0], s...)
 	if err := c.runBeforeResponse(); err != nil {
 		return err
 	}
@@ -869,15 +886,16 @@ func (c *Ctx) writeResponse(body []byte) error {
 	if c.responded {
 		return nil
 	}
-	if err := c.runBeforeResponse(); err != nil {
-		return err
-	}
 	if c.bodyTransform != nil {
 		var err error
 		body, err = c.bodyTransform(body)
 		if err != nil {
 			return err
 		}
+	}
+	c.responseSnapshot = append(c.responseSnapshot[:0], body...)
+	if err := c.runBeforeResponse(); err != nil {
+		return err
 	}
 	c.responded = true
 	if c.writeBuf == nil {

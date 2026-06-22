@@ -67,6 +67,8 @@ type Config struct {
 	OptionsHandler       OptionsHandler
 	Logger               *log.Logger
 	TemplateEngine       TemplateEngine
+	// Reliability enables the built-in request journal, idempotency store, and durable async queue.
+	Reliability ReliabilityConfig
 	// Debug exposes private error causes in 500 responses. Keep disabled in production.
 	Debug bool
 }
@@ -107,6 +109,7 @@ type App struct {
 	groups       []*Group
 	lastRoute    namedRoute
 	errorCounts  sync.Map // error code -> *atomic.Uint64
+	reliability  *Reliability
 }
 
 type connState struct {
@@ -154,6 +157,7 @@ func New(config ...Config) *App {
 		cfg.OptionsHandler = c.OptionsHandler
 		cfg.Logger = c.Logger
 		cfg.TemplateEngine = c.TemplateEngine
+		cfg.Reliability = c.Reliability
 		cfg.Debug = c.Debug
 	}
 	if cfg.ErrorHandler == nil {
@@ -179,6 +183,14 @@ func New(config ...Config) *App {
 		router: newRouter(),
 		logger: logger,
 		conns:  make(map[net.Conn]*connState),
+	}
+	if cfg.Reliability.Enabled {
+		reliability, err := NewReliability(cfg.Reliability)
+		if err != nil {
+			panic(err)
+		}
+		app.reliability = reliability
+		app.middleware = append(app.middleware, reliability.Middleware())
 	}
 
 	if cfg.MaxConnections > 0 {
@@ -383,6 +395,13 @@ func (a *App) Serve(ln net.Listener) error {
 	// traffic from every request while preserving build-time safety.
 	a.router.Freeze()
 
+	if a.reliability != nil {
+		if err := a.reliability.Start(); err != nil {
+			_ = ln.Close()
+			return err
+		}
+	}
+
 	for _, fn := range a.hooks.onListen {
 		if err := fn(); err != nil {
 			_ = ln.Close()
@@ -512,6 +531,11 @@ func (a *App) closeAllConnections() {
 
 func (a *App) runShutdownHooks() {
 	a.shutdownOnce.Do(func() {
+		if a.reliability != nil {
+			if err := a.reliability.Close(); err != nil {
+				a.logger.Printf("[fasthttp] reliability shutdown error: %v", err)
+			}
+		}
 		for _, fn := range a.hooks.onShutdown {
 			if err := fn(); err != nil {
 				a.logger.Printf("[fasthttp] shutdown hook error: %v", err)
@@ -1040,3 +1064,14 @@ var serverError501 = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r
 var serverError503 = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var serverError505 = []byte("HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 var plainTextCT = []byte("text/plain; charset=utf-8")
+
+// Reliability returns the configured reliability runtime, if enabled.
+func (a *App) Reliability() *Reliability { return a.reliability }
+
+// Queue returns the embedded durable queue when reliability queue support is enabled.
+func (a *App) Queue() *DurableQueue {
+	if a.reliability == nil {
+		return nil
+	}
+	return a.reliability.Queue()
+}

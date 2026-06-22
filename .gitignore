@@ -2,3 +2,4 @@ _spl
 .DS_Store
 dagflow/data/*
 *.log
+.fh-data

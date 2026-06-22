@@ -38,17 +38,17 @@ const (
 	h2FlagPadded     = uint8(0x8)
 	h2FlagPriority   = uint8(0x20)
 
-	h2NoError          = uint32(0)
-	h2ProtocolError    = uint32(1)
-	h2InternalError    = uint32(2)
-	h2FlowControlError = uint32(3)
+	h2NoError            = uint32(0)
+	h2ProtocolError      = uint32(1)
+	h2InternalError      = uint32(2)
+	h2FlowControlError   = uint32(3)
 	h2ErrSettingsTimeout = uint32(4)
-	h2ErrStreamClosed  = uint32(5)
-	h2FrameSizeError   = uint32(6)
-	h2RefusedStream    = uint32(7)
-	h2Cancel           = uint32(8)
-	h2CompressionError = uint32(9)
-	h2EnhanceYourCalm  = uint32(11)
+	h2ErrStreamClosed    = uint32(5)
+	h2FrameSizeError     = uint32(6)
+	h2RefusedStream      = uint32(7)
+	h2Cancel             = uint32(8)
+	h2CompressionError   = uint32(9)
+	h2EnhanceYourCalm    = uint32(11)
 	h2InadequateSecurity = uint32(12)
 
 	stateIdle             = 0
@@ -62,8 +62,8 @@ const (
 	h2MaxWindow       = int64(1<<31 - 1)
 	h2SettingsTimeout = 10 * time.Second
 
-	maxContinuationFrames = 64
-	maxRSTStreamPerMinute = 60
+	maxContinuationFrames  = 64
+	maxRSTStreamPerMinute  = 60
 	windowsUpdateThreshold = h2InitialWindow / 2
 )
 
@@ -106,10 +106,10 @@ type h2Conn struct {
 	upgradeStream     *h2Stream
 
 	// Per-connection buffered flow control window counters for batching
-	connRecvWindow     int64
+	connRecvWindow int64
 
 	// Rapid reset protection
-	resetCount    int
+	resetCount       int
 	resetWindowStart time.Time
 
 	// SETTINGS ACK timeout
@@ -1022,15 +1022,16 @@ func (r *h2Response) writeResponse(c *Ctx, body []byte) error {
 	if c.responded || r.ended.Load() {
 		return nil
 	}
-	if err := c.runBeforeResponse(); err != nil {
-		return err
-	}
 	if c.bodyTransform != nil {
 		var err error
 		body, err = c.bodyTransform(body)
 		if err != nil {
 			return err
 		}
+	}
+	c.responseSnapshot = append(c.responseSnapshot[:0], body...)
+	if err := c.runBeforeResponse(); err != nil {
+		return err
 	}
 	c.responded = true
 	r.trailers = append([]Header(nil), c.responseTrailers...)
@@ -1258,7 +1259,7 @@ func (h *h2Conn) sendData(s *h2Stream, data []byte, end bool) error {
 			h.flowMu.Unlock()
 			continue
 		}
-			h.connSendWindow -= n
+		h.connSendWindow -= n
 		s.sendWindow -= n
 		h.flowMu.Unlock()
 
