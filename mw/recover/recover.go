@@ -18,7 +18,7 @@ type Config struct {
 	EnableStackTrace bool
 	StackTraceLimit  int
 
-	Logger Logger
+	Logger  Logger
 	Handler PanicHandler
 }
 

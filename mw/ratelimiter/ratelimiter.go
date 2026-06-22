@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	HeaderLimit     = "X-RateLimit-Limit"
-	HeaderRemaining = "X-RateLimit-Remaining"
-	HeaderReset     = "X-RateLimit-Reset"
+	HeaderLimit      = "X-RateLimit-Limit"
+	HeaderRemaining  = "X-RateLimit-Remaining"
+	HeaderReset      = "X-RateLimit-Reset"
 	HeaderRetryAfter = "Retry-After"
 )
 

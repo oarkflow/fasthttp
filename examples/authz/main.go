@@ -154,8 +154,8 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	app.Get("/admin/dashboard", func(c *fh.Ctx) error {
 		return c.JSON(map[string]any{
-			"ok":      true,
-			"message": "admin dashboard",
+			"ok":       true,
+			"message":  "admin dashboard",
 			"decision": middleware.FHDecision(c),
 		})
 	})
@@ -165,9 +165,9 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	app.Get("/users/:id", func(c *fh.Ctx) error {
 		return c.JSON(map[string]any{
-			"ok":      true,
-			"message": "user profile",
-			"user":    c.Param("id"),
+			"ok":       true,
+			"message":  "user profile",
+			"user":     c.Param("id"),
 			"decision": middleware.FHDecision(c),
 		})
 	})
@@ -177,8 +177,8 @@ func main() {
 	// ──────────────────────────────────────────────────────────────────────
 	app.Get("/public/info", func(c *fh.Ctx) error {
 		return c.JSON(map[string]any{
-			"ok":      true,
-			"message": "public info",
+			"ok":       true,
+			"message":  "public info",
 			"decision": middleware.FHDecision(c),
 		})
 	})

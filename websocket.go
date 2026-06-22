@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	ErrInvalidUpgrade     = errors.New("invalid connection upgrade request")
-	ErrHijackHTTP2        = errors.New("connection hijacking is unavailable on HTTP/2 streams")
+	ErrInvalidUpgrade = errors.New("invalid connection upgrade request")
+	ErrHijackHTTP2    = errors.New("connection hijacking is unavailable on HTTP/2 streams")
 )
 
 func WriteAll(w io.Writer, b []byte) error {

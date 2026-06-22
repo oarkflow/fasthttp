@@ -573,10 +573,10 @@ func main() {
 		PingInterval:         30 * time.Second,
 		PongTimeout:          75 * time.Second,
 		MaxMessagesPerSecond: 128,
-		AllowedOrigins:      []string{"https://yourdomain.com", "http://localhost:3000"},
-		Subprotocols:        []string{"json", "chat.v1"},
-		EnableHeartbeat:     true,
-		Manager:             wsManager,
+		AllowedOrigins:       []string{"https://yourdomain.com", "http://localhost:3000"},
+		Subprotocols:         []string{"json", "chat.v1"},
+		EnableHeartbeat:      true,
+		Manager:              wsManager,
 	}
 
 	// ──────────────────────────────────────────────────────────────────────
@@ -592,9 +592,9 @@ func main() {
 			case websocket.Text:
 				ws.WriteMessage(websocket.Text, []byte("echo: "+string(msg)))
 			case websocket.Binary:
-			if err := ws.WriteMessage(websocket.Binary, msg); err != nil {
-				return err
-			}
+				if err := ws.WriteMessage(websocket.Binary, msg); err != nil {
+					return err
+				}
 			case websocket.Close:
 				return nil
 			case websocket.Ping:

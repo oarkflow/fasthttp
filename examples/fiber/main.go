@@ -38,13 +38,13 @@ type Request struct {
 }
 
 type Response struct {
-	Message     string       `json:"message"`
-	RequestID   string       `json:"request_id"`
-	User        Request      `json:"user"`
-	ServerTime  time.Time    `json:"server_time"`
-	BytesEchoed int          `json:"bytes_echoed"`
-	OK          bool         `json:"ok"`
-	Extra       fiber.Map    `json:"extra"`
+	Message     string    `json:"message"`
+	RequestID   string    `json:"request_id"`
+	User        Request   `json:"user"`
+	ServerTime  time.Time `json:"server_time"`
+	BytesEchoed int       `json:"bytes_echoed"`
+	OK          bool      `json:"ok"`
+	Extra       fiber.Map `json:"extra"`
 }
 
 // Fiber instance
@@ -91,10 +91,10 @@ func unmarshalHandler(c fiber.Ctx) error {
 
 func jsonHandler(c fiber.Ctx) error {
 	resp := Response{
-		Message:   "Hello, World 👋!",
-		RequestID: "resp-001",
+		Message:    "Hello, World 👋!",
+		RequestID:  "resp-001",
 		ServerTime: time.Now().UTC(),
-		OK:        true,
+		OK:         true,
 		User: Request{
 			ID:       "user-123",
 			Name:     "Alice Johnson",
