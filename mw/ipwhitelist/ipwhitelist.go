@@ -21,8 +21,10 @@ type Store interface {
 
 type Config struct {
 	Allowed []string
+	Blocked []string
 
-	Store Store
+	Store      Store
+	BlockStore Store
 
 	KeyFunc KeyFunc
 
@@ -60,7 +62,11 @@ func NewWithConfig(config Config) fh.HandlerFunc {
 			return cfg.Forbidden(ctx)
 		}
 
-		if cfg.Store.Allowed(ip) {
+		if cfg.BlockStore != nil && cfg.BlockStore.Allowed(ip) {
+			return cfg.Forbidden(ctx)
+		}
+
+		if cfg.Store == nil || cfg.Store.Allowed(ip) {
 			return ctx.Next()
 		}
 
@@ -72,12 +78,19 @@ func normalize(cfg Config) (Config, error) {
 	if cfg.Forbidden == nil {
 		cfg.Forbidden = DefaultForbiddenHandler
 	}
-	if cfg.Store == nil {
+	if cfg.Store == nil && len(cfg.Allowed) > 0 {
 		store, err := NewMemoryStore(cfg.Allowed...)
 		if err != nil {
 			return cfg, err
 		}
 		cfg.Store = store
+	}
+	if cfg.BlockStore == nil && len(cfg.Blocked) > 0 {
+		store, err := NewMemoryStore(cfg.Blocked...)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.BlockStore = store
 	}
 	return cfg, nil
 }

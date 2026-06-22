@@ -345,7 +345,7 @@ routes where replayed response is unsafe
 
 # Reliable Endpoint Abstraction
 
-`ReliableEndpoint[Req, Res]` is a typed abstraction for reliable request handling.
+`reliability.Endpoint[Req, Res]` is a typed abstraction for reliable request handling.
 
 It combines:
 
@@ -371,7 +371,7 @@ type CreateOrderResponse struct {
 	Status  string `json:"status"`
 }
 
-endpoint := fh.ReliableEndpoint[CreateOrderRequest, CreateOrderResponse]{
+endpoint := reliability.Endpoint(reliability.EndpointOptions[CreateOrderRequest, CreateOrderResponse]{
 	Policy: fh.ReliabilityPolicy{
 		Enabled:            true,
 		RequireIdempotency: true,
@@ -1299,7 +1299,7 @@ you want simple browser-native streaming
 
 # Advanced Static File Server
 
-`StaticAdvanced` and `StaticFilesAdvanced` provide a better static file server.
+`static.New` provides the advanced static file handler from `mw/static`.
 
 Features:
 
@@ -1317,7 +1317,7 @@ range-friendly behavior where supported
 Example:
 
 ```go
-app.Get("/static/*", fh.StaticAdvanced("./public", fh.StaticAdvancedConfig{
+app.Get("/static/*", static.New("./public", static.Config{
 	CacheControl: "public, max-age=3600",
 	ETag:         true,
 	LastModified: true,

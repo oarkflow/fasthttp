@@ -12,8 +12,12 @@ import (
 	"time"
 
 	"github.com/oarkflow/fh"
+	"github.com/oarkflow/fh/mw/logger"
+	"github.com/oarkflow/fh/mw/metrics"
 	"github.com/oarkflow/fh/mw/recover"
+	reliabilitymw "github.com/oarkflow/fh/mw/reliability"
 	"github.com/oarkflow/fh/mw/security"
+	"github.com/oarkflow/fh/mw/signature"
 )
 
 type EmailRequest struct {
@@ -41,8 +45,10 @@ func main() {
 	}})
 	app.Use(recover.New())
 	app.Use(security.New())
-	app.Use(fh.AccessLog(fh.AccessLogConfig{Mode: fh.AccessLogJSON}))
-	app.EnableMetrics("/_fh/metrics")
+	app.Use(logger.New(logger.Config{FormatName: "json"}))
+	m := metrics.New()
+	app.Use(m.Middleware())
+	app.Get("/_fh/metrics", m.Handler())
 	app.EnableSecurityEvents("/_fh/security-events")
 
 	app.Queue().Register("email.send", func(ctx context.Context, job *fh.QueueJob) error {
@@ -60,11 +66,11 @@ func main() {
 		return nil
 	})
 
-	app.Post("/payments", fh.ReliableEndpoint(fh.ReliableEndpointOptions[PaymentRequest, PaymentResponse]{
+	app.Post("/payments", reliabilitymw.Endpoint(reliabilitymw.EndpointOptions[PaymentRequest, PaymentResponse]{
 		Policy: fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true, ReplayResponse: true, IdempotencyFingerprint: func(c *fh.Ctx) string {
 			var p PaymentRequest
 			_ = c.BodyParser(&p)
-			return fh.DeterministicIdempotency("payment", p.ExternalID, fmt.Sprint(p.Amount))
+			return fh.DeterministicIdempotencyKey("payment", p.ExternalID, fmt.Sprint(p.Amount))
 		}, Data: fh.DataPolicy{Sensitivity: "financial", RedactLogs: true}},
 		Validate: func(c *fh.Ctx, r *PaymentRequest) error {
 			if r.ExternalID == "" || r.Amount <= 0 {
@@ -79,7 +85,7 @@ func main() {
 		},
 	}))
 
-	app.Post("/email", fh.Reliable(fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true, ReplayResponse: true}), func(c *fh.Ctx) error {
+	app.Post("/email", reliabilitymw.New(fh.ReliabilityPolicy{Enabled: true, RequireIdempotency: true, Journal: true, ReplayResponse: true}), func(c *fh.Ctx) error {
 		var req EmailRequest
 		if err := c.BodyParser(&req); err != nil {
 			return err
@@ -92,7 +98,7 @@ func main() {
 	})
 
 	secret := []byte("change-me")
-	app.Post("/webhooks/payment", fh.SignedRequests(fh.SignatureConfig{Secret: secret}), func(c *fh.Ctx) error {
+	app.Post("/webhooks/payment", signature.New(signature.Config{Secret: secret}), func(c *fh.Ctx) error {
 		id, err := c.ServerInbox().Accept(c.Context(), fh.InboxEvent{Source: "payment", EventID: c.Get("X-Event-ID"), Payload: c.BodyCopy()}, "inbox.payment")
 		if err != nil {
 			return err

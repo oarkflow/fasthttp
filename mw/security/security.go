@@ -7,24 +7,30 @@ import (
 )
 
 type Config struct {
-	ContentSecurityPolicy string
-	HSTSMaxAge            int
-	HSTSIncludeSubDomains bool
-	FrameDeny             bool
-	ContentTypeNosniff    bool
-	XSSProtection         string
-	ReferrerPolicy        string
-	PermissionsPolicy     string
+	ContentSecurityPolicy     string
+	HSTSMaxAge                int
+	HSTSIncludeSubDomains     bool
+	HSTSPreload               bool
+	FrameDeny                 bool
+	ContentTypeNosniff        bool
+	XSSProtection             string
+	CrossOriginOpenerPolicy   string
+	CrossOriginResourcePolicy string
+	CrossOriginEmbedderPolicy string
+	ReferrerPolicy            string
+	PermissionsPolicy         string
 }
 
 var defaultConfig = Config{
-	HSTSMaxAge:            31536000,
-	HSTSIncludeSubDomains: true,
-	FrameDeny:             true,
-	ContentTypeNosniff:    true,
-	XSSProtection:         "0",
-	ReferrerPolicy:        "no-referrer",
-	PermissionsPolicy:     "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=(), interest-cohort=()",
+	HSTSMaxAge:                31536000,
+	HSTSIncludeSubDomains:     true,
+	FrameDeny:                 true,
+	ContentTypeNosniff:        true,
+	XSSProtection:             "0",
+	ReferrerPolicy:            "no-referrer",
+	CrossOriginOpenerPolicy:   "same-origin",
+	CrossOriginResourcePolicy: "same-origin",
+	PermissionsPolicy:         "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=(), interest-cohort=()",
 }
 
 func New(config ...Config) fh.HandlerFunc {
@@ -49,6 +55,15 @@ func New(config ...Config) fh.HandlerFunc {
 	if cfg.ReferrerPolicy != "" {
 		static = append(static, [2]string{"Referrer-Policy", cfg.ReferrerPolicy})
 	}
+	if cfg.CrossOriginOpenerPolicy != "" {
+		static = append(static, [2]string{"Cross-Origin-Opener-Policy", cfg.CrossOriginOpenerPolicy})
+	}
+	if cfg.CrossOriginResourcePolicy != "" {
+		static = append(static, [2]string{"Cross-Origin-Resource-Policy", cfg.CrossOriginResourcePolicy})
+	}
+	if cfg.CrossOriginEmbedderPolicy != "" {
+		static = append(static, [2]string{"Cross-Origin-Embedder-Policy", cfg.CrossOriginEmbedderPolicy})
+	}
 	if cfg.PermissionsPolicy != "" {
 		static = append(static, [2]string{"Permissions-Policy", cfg.PermissionsPolicy})
 	}
@@ -56,6 +71,9 @@ func New(config ...Config) fh.HandlerFunc {
 		hsts := "max-age=" + strconv.Itoa(cfg.HSTSMaxAge)
 		if cfg.HSTSIncludeSubDomains {
 			hsts += "; includeSubDomains"
+		}
+		if cfg.HSTSPreload {
+			hsts += "; preload"
 		}
 		static = append(static, [2]string{"Strict-Transport-Security", hsts})
 	}

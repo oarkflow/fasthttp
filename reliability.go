@@ -1075,80 +1075,87 @@ type ReliabilityPolicy struct {
 	ConcurrencyKey         func(*Ctx) string
 }
 
-func Reliable(p ReliabilityPolicy) HandlerFunc {
-	return func(c *Ctx) error {
-		if !p.Enabled {
-			return c.Next()
-		}
-		r := c.server.Reliability()
-		if r == nil {
-			return c.Next()
-		}
-		if p.Data.Sensitivity != "" {
-			c.Locals("fh.data_policy", p.Data)
-		}
-		requestID, _ := c.Locals("request_id").(string)
-		if requestID == "" {
-			requestID = newRequestID()
-			c.Set(HeaderRequestID, requestID)
-			c.Locals("request_id", requestID)
-		}
-		if p.Journal && r.journal != nil {
-			_ = r.journal.Append(RequestJournalEntry{RequestID: requestID, Event: "policy.received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.Body()), RemoteIP: c.IP(), Time: time.Now().UTC()})
-		}
-		if r.idem != nil && isUnsafeMethod(c.Header.Method) {
-			key := ""
-			if p.IdempotencyKey != nil {
-				key = p.IdempotencyKey(c)
-			}
-			if key == "" {
-				key = c.Get(r.cfg.IdempotencyHeader)
-			}
-			if key == "" && p.IdempotencyFingerprint != nil {
-				key = p.IdempotencyFingerprint(c)
-				c.Set(r.cfg.IdempotencyHeader, key)
-			}
-			if key == "" && p.RequireIdempotency {
-				return c.Status(StatusBadRequest).JSON(Map{"error": "missing_idempotency_key", "request_id": requestID})
-			}
-			if key != "" {
-				if !validExternalID(key) {
-					return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
-				}
-				reqHash := hashRequest(c.Header.Method, c.path(), c.Body())
-				if p.IdempotencyFingerprint != nil {
-					reqHash = p.IdempotencyFingerprint(c)
-				}
-				decision, rec, err := r.idem.Begin(key, reqHash, c.Method(), c.Path())
-				if err != nil {
-					return err
-				}
-				switch decision {
-				case IdempotencyReplay:
-					c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
-					if p.ReplayResponse {
-						for k, vals := range rec.Headers {
-							for _, v := range vals {
-								setReplayHeader(c, k, v)
-							}
-						}
-						if rec.ContentType != "" {
-							c.Type(rec.ContentType)
-						}
-						return c.Status(rec.StatusCode).SendBytes(rec.Response)
-					}
-				case IdempotencyConflict:
-					return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
-				case IdempotencyProcessing:
-					return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
-				}
-				c.OnBeforeResponse(func(ctx *Ctx) error {
-					return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
-				})
-			}
-		}
+// ApplyPolicy runs a route reliability policy against a request. Reusable
+// middleware construction lives in mw/reliability.
+func (r *Reliability) ApplyPolicy(c *Ctx, p ReliabilityPolicy) error {
+	if !p.Enabled {
 		return c.Next()
 	}
+	if r == nil {
+		return c.Next()
+	}
+	if p.Data.Sensitivity != "" {
+		c.Locals("fh.data_policy", p.Data)
+	}
+	requestID, _ := c.Locals("request_id").(string)
+	if requestID == "" {
+		requestID = newRequestID()
+		c.Set(HeaderRequestID, requestID)
+		c.Locals("request_id", requestID)
+	}
+	if p.Journal && r.journal != nil {
+		_ = r.journal.Append(RequestJournalEntry{RequestID: requestID, Event: "policy.received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.Body()), RemoteIP: c.IP(), Time: time.Now().UTC()})
+	}
+	if r.idem != nil && isUnsafeMethod(c.Header.Method) {
+		key := ""
+		if p.IdempotencyKey != nil {
+			key = p.IdempotencyKey(c)
+		}
+		if key == "" {
+			key = c.Get(r.cfg.IdempotencyHeader)
+		}
+		if key == "" && p.IdempotencyFingerprint != nil {
+			key = p.IdempotencyFingerprint(c)
+			c.Set(r.cfg.IdempotencyHeader, key)
+		}
+		if key == "" && p.RequireIdempotency {
+			return c.Status(StatusBadRequest).JSON(Map{"error": "missing_idempotency_key", "request_id": requestID})
+		}
+		if key != "" {
+			if !validExternalID(key) {
+				return c.Status(StatusBadRequest).JSON(Map{"error": "invalid_idempotency_key", "request_id": requestID})
+			}
+			reqHash := hashRequest(c.Header.Method, c.path(), c.Body())
+			if p.IdempotencyFingerprint != nil {
+				reqHash = p.IdempotencyFingerprint(c)
+			}
+			decision, rec, err := r.idem.Begin(key, reqHash, c.Method(), c.Path())
+			if err != nil {
+				return err
+			}
+			switch decision {
+			case IdempotencyReplay:
+				c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
+				if p.ReplayResponse {
+					for k, vals := range rec.Headers {
+						for _, v := range vals {
+							setReplayHeader(c, k, v)
+						}
+					}
+					if rec.ContentType != "" {
+						c.Type(rec.ContentType)
+					}
+					return c.Status(rec.StatusCode).SendBytes(rec.Response)
+				}
+			case IdempotencyConflict:
+				return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
+			case IdempotencyProcessing:
+				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
+			}
+			c.OnBeforeResponse(func(ctx *Ctx) error {
+				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
+			})
+		}
+	}
+	return c.Next()
+}
+
+// Reliability returns the request's configured reliability runtime.
+func (c *Ctx) Reliability() *Reliability {
+	if c == nil || c.server == nil {
+		return nil
+	}
+	return c.server.Reliability()
 }
 
 type ReliabilityTx interface {
@@ -1285,58 +1292,26 @@ func (i *Inbox) Accept(ctx context.Context, ev InboxEvent, queueType string) (st
 	return i.q.Enqueue(queueType, ev)
 }
 
-type ReliableEndpointOptions[Req any, Res any] struct {
-	Policy    ReliabilityPolicy
-	Validate  func(*Ctx, *Req) error
-	Handle    func(context.Context, *Ctx, Req) (Res, error)
-	QueueType string
-	Async     bool
+// RunReliableEndpoint applies a reliability policy around an endpoint handler.
+// Endpoint construction itself lives in mw/reliability.
+func (c *Ctx) RunReliableEndpoint(policy ReliabilityPolicy, endpoint HandlerFunc) error {
+	if !policy.Enabled {
+		return endpoint(c)
+	}
+	originalHandlers, originalIndex := c.handlers, c.handlerIndex
+	remaining := append([]HandlerFunc{endpoint}, originalHandlers[originalIndex:]...)
+	c.handlers, c.handlerIndex = remaining, 0
+	err := c.Reliability().ApplyPolicy(c, policy)
+	c.handlers, c.handlerIndex = originalHandlers, originalIndex
+	return err
 }
 
-func ReliableEndpoint[Req any, Res any](opt ReliableEndpointOptions[Req, Res]) HandlerFunc {
-	endpoint := func(c *Ctx) error {
-		var req Req
-		if err := c.BodyParser(&req); err != nil {
-			return err
-		}
-		if opt.Validate != nil {
-			if err := opt.Validate(c, &req); err != nil {
-				return err
-			}
-		}
-		if opt.Async {
-			if c.server.Queue() == nil {
-				return errors.New("fh: queue disabled")
-			}
-			id, err := c.server.Queue().Enqueue(opt.QueueType, req)
-			if err != nil {
-				return err
-			}
-			c.Lifecycle().Mark(c, LifecycleQueued)
-			return c.Status(StatusAccepted).JSON(Map{"job_id": id, "status": "accepted"})
-		}
-		if opt.Handle == nil {
-			var zero Res
-			return c.JSON(zero)
-		}
-		res, err := opt.Handle(c.Context(), c, req)
-		if err != nil {
-			return err
-		}
-		c.Lifecycle().Mark(c, LifecycleCompleted)
-		return c.JSON(res)
+// Queue returns the request's configured durable queue.
+func (c *Ctx) Queue() Queue {
+	if c == nil || c.server == nil {
+		return nil
 	}
-	return func(c *Ctx) error {
-		if !opt.Policy.Enabled {
-			return endpoint(c)
-		}
-		origHandlers, origIndex := c.handlers, c.handlerIndex
-		remaining := append([]HandlerFunc{endpoint}, origHandlers[origIndex:]...)
-		c.handlers, c.handlerIndex = remaining, 0
-		err := Reliable(opt.Policy)(c)
-		c.handlers, c.handlerIndex = origHandlers, origIndex
-		return err
-	}
+	return c.server.Queue()
 }
 
 func (a *App) Outbox() *Outbox {

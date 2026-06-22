@@ -1,26 +1,17 @@
 package fh
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -65,9 +56,12 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 	h := func(c *Ctx) error {
 		reqPtr := reflect.New(reqType)
 		if len(c.Body()) != 0 {
-			if err := json.Unmarshal(c.Body(), reqPtr.Interface()); err != nil {
-				return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_json", Message: err.Error(), RequestID: requestIDFromCtx(c)})
+			if err := c.BodyParser(reqPtr.Interface()); err != nil {
+				return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_body", Message: err.Error(), RequestID: requestIDFromCtx(c)})
 			}
+		}
+		if err := bindTaggedFields(c, reqPtr.Elem()); err != nil {
+			return c.Status(StatusBadRequest).JSON(StructuredError{Error: "invalid_request", Message: err.Error(), RequestID: requestIDFromCtx(c)})
 		}
 		reqVal := reqPtr.Elem()
 		if v, ok := reqPtr.Interface().(Validator); ok {
@@ -98,6 +92,102 @@ func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFu
 		ri.ResponseSchema = schemaFromType(resType, map[reflect.Type]bool{})
 	})
 	return a
+}
+
+func bindTaggedFields(c *Ctx, v reflect.Value) error {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		fv := v.Field(i)
+		var raw string
+		name := ""
+		source := ""
+		for _, key := range []string{"param", "path"} {
+			if tag := f.Tag.Get(key); tag != "" && tag != "-" {
+				name, source = strings.Split(tag, ",")[0], "param"
+				raw = c.Param(name)
+				break
+			}
+		}
+		if source == "" {
+			if tag := f.Tag.Get("query"); tag != "" && tag != "-" {
+				name, source = strings.Split(tag, ",")[0], "query"
+				raw = c.Query(name)
+			}
+		}
+		if source == "" {
+			if tag := f.Tag.Get("header"); tag != "" && tag != "-" {
+				name, source = strings.Split(tag, ",")[0], "header"
+				raw = c.Get(name)
+			}
+		}
+		if source == "" {
+			if tag := f.Tag.Get("cookie"); tag != "" && tag != "-" {
+				name, source = strings.Split(tag, ",")[0], "cookie"
+				raw = c.GetCookie(name)
+			}
+		}
+		if source == "" || raw == "" {
+			continue
+		}
+		if err := setReflectScalar(fv, raw); err != nil {
+			return fmt.Errorf("%s %q: %w", source, name, err)
+		}
+	}
+	return nil
+}
+
+func setReflectScalar(v reflect.Value, raw string) error {
+	if !v.CanSet() {
+		return nil
+	}
+	if v.Kind() == reflect.Pointer {
+		v.Set(reflect.New(v.Type().Elem()))
+		return setReflectScalar(v.Elem(), raw)
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(raw)
+	case reflect.Bool:
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			return err
+		}
+		v.SetBool(b)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		i, err := strconv.ParseInt(raw, 10, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetInt(i)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		u, err := strconv.ParseUint(raw, 10, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetUint(u)
+	case reflect.Float32, reflect.Float64:
+		f, err := strconv.ParseFloat(raw, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetFloat(f)
+	default:
+		return nil
+	}
+	return nil
 }
 
 func niceTypeName(t reflect.Type) string {
@@ -312,31 +402,7 @@ func (a *App) EnableRouteList(path string) *App {
 
 /* metrics are implemented in policy.go */
 
-// Request lifecycle hooks.
-type RequestHook func(*Ctx)
-type RequestHooks struct {
-	Before RequestHook
-	After  RequestHook
-	Error  func(*Ctx, error)
-}
-
-func LifecycleHooks(h RequestHooks) HandlerFunc {
-	return func(c *Ctx) error {
-		if h.Before != nil {
-			h.Before(c)
-		}
-		err := c.Next()
-		if err != nil && h.Error != nil {
-			h.Error(c, err)
-		}
-		if h.After != nil {
-			h.After(c)
-		}
-		return err
-	}
-}
-
-// Security helpers and middleware.
+// Security helpers.
 func ConstantTimeEqual(a, b string) bool { return hmac.Equal([]byte(a), []byte(b)) }
 func RedactSecret(s string) string {
 	if s == "" {
@@ -362,214 +428,6 @@ func VerifySignedCookie(s string, secret []byte) (string, bool) {
 	mac.Write([]byte(val))
 	exp := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return val, hmac.Equal([]byte(sig), []byte(exp))
-}
-
-type APIKeyConfig struct {
-	Header string
-	Query  string
-	Keys   []string
-	Lookup func(*Ctx, string) bool
-}
-
-func APIKey(cfg APIKeyConfig) HandlerFunc {
-	if cfg.Header == "" {
-		cfg.Header = "X-API-Key"
-	}
-	set := map[string]struct{}{}
-	for _, k := range cfg.Keys {
-		set[k] = struct{}{}
-	}
-	return func(c *Ctx) error {
-		key := c.Get(cfg.Header)
-		if key == "" && cfg.Query != "" {
-			key = c.Query(cfg.Query)
-		}
-		ok := false
-		if cfg.Lookup != nil {
-			ok = cfg.Lookup(c, key)
-		} else {
-			_, ok = set[key]
-		}
-		if key == "" || !ok {
-			return c.Status(StatusUnauthorized).JSON(Map{"error": "invalid_api_key"})
-		}
-		return c.Next()
-	}
-}
-
-type IPListConfig struct {
-	Allow []string
-	Block []string
-}
-
-func IPList(cfg IPListConfig) HandlerFunc {
-	allows := compileCIDRs(cfg.Allow)
-	blocks := compileCIDRs(cfg.Block)
-	return func(c *Ctx) error {
-		ip := net.ParseIP(c.IP())
-		if ip == nil {
-			return c.Status(StatusForbidden).JSON(Map{"error": "invalid_ip"})
-		}
-		if matchCIDRs(ip, blocks) {
-			return c.Status(StatusForbidden).JSON(Map{"error": "ip_blocked"})
-		}
-		if len(allows) > 0 && !matchCIDRs(ip, allows) {
-			return c.Status(StatusForbidden).JSON(Map{"error": "ip_not_allowed"})
-		}
-		return c.Next()
-	}
-}
-func compileCIDRs(in []string) []*net.IPNet {
-	out := []*net.IPNet{}
-	for _, s := range in {
-		if ip := net.ParseIP(s); ip != nil {
-			bits := 128
-			if ip.To4() != nil {
-				bits = 32
-			}
-			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-			continue
-		}
-		if _, n, err := net.ParseCIDR(s); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-func matchCIDRs(ip net.IP, nets []*net.IPNet) bool {
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-type HMACConfig struct {
-	Secret          []byte
-	Header          string
-	TimestampHeader string
-	Tolerance       time.Duration
-}
-
-func HMACSignedRequest(cfg HMACConfig) HandlerFunc {
-	if cfg.Header == "" {
-		cfg.Header = "X-Signature"
-	}
-	if cfg.TimestampHeader == "" {
-		cfg.TimestampHeader = "X-Timestamp"
-	}
-	if cfg.Tolerance <= 0 {
-		cfg.Tolerance = 5 * time.Minute
-	}
-	return func(c *Ctx) error {
-		ts := c.Get(cfg.TimestampHeader)
-		sig := strings.TrimPrefix(c.Get(cfg.Header), "sha256=")
-		if ts == "" || sig == "" {
-			return c.Status(StatusUnauthorized).JSON(Map{"error": "missing_signature"})
-		}
-		when, err := strconv.ParseInt(ts, 10, 64)
-		if err != nil || absDuration(time.Since(time.Unix(when, 0))) > cfg.Tolerance {
-			return c.Status(StatusUnauthorized).JSON(Map{"error": "stale_signature"})
-		}
-		mac := hmac.New(sha256.New, cfg.Secret)
-		mac.Write([]byte(ts))
-		mac.Write([]byte("."))
-		mac.Write(c.Body())
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(sig), []byte(expected)) {
-			return c.Status(StatusUnauthorized).JSON(Map{"error": "invalid_signature"})
-		}
-		return c.Next()
-	}
-}
-func HMACWebhook(secret []byte, header string) HandlerFunc {
-	return HMACSignedRequest(HMACConfig{Secret: secret, Header: header, TimestampHeader: "X-Timestamp"})
-}
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
-}
-
-type ReplayProtectionStore interface {
-	Seen(key string, ttl time.Duration) (bool, error)
-}
-type MemoryReplayStore struct {
-	mu sync.Mutex
-	m  map[string]time.Time
-}
-
-func NewMemoryReplayStore() *MemoryReplayStore { return &MemoryReplayStore{m: map[string]time.Time{}} }
-func (s *MemoryReplayStore) Seen(key string, ttl time.Duration) (bool, error) {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, exp := range s.m {
-		if exp.Before(now) {
-			delete(s.m, k)
-		}
-	}
-	if exp, ok := s.m[key]; ok && exp.After(now) {
-		return true, nil
-	}
-	s.m[key] = now.Add(ttl)
-	return false, nil
-}
-func ReplayProtection(store ReplayProtectionStore, header string, ttl time.Duration) HandlerFunc {
-	if store == nil {
-		store = NewMemoryReplayStore()
-	}
-	if header == "" {
-		header = "X-Nonce"
-	}
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	return func(c *Ctx) error {
-		nonce := c.Get(header)
-		if nonce == "" {
-			return c.Status(StatusUnauthorized).JSON(Map{"error": "missing_nonce"})
-		}
-		seen, err := store.Seen(nonce, ttl)
-		if err != nil {
-			return err
-		}
-		if seen {
-			return c.Status(StatusConflict).JSON(Map{"error": "replay_detected"})
-		}
-		return c.Next()
-	}
-}
-
-func RequestTimeout(d time.Duration) HandlerFunc {
-	return func(c *Ctx) error {
-		ctx, cancel := context.WithTimeout(c.Context(), d)
-		defer cancel()
-		c.SetContext(ctx)
-		return c.Next()
-	}
-}
-func BodyLimit(n int) HandlerFunc {
-	return func(c *Ctx) error {
-		if n > 0 && len(c.Body()) > n {
-			return c.Status(StatusPayloadTooLarge).JSON(Map{"error": "body_too_large"})
-		}
-		return c.Next()
-	}
-}
-
-// Reliability route policy helpers are implemented in reliability.go.
-func DeterministicIdempotencyMiddleware(fn func(*Ctx) string) HandlerFunc {
-	return func(c *Ctx) error {
-		if fn != nil {
-			if key := fn(c); key != "" {
-				c.Header.Set(HeaderIdempotencyKey, key)
-			}
-		}
-		return c.Next()
-	}
 }
 
 type AtomicJobOptions struct {
@@ -606,78 +464,6 @@ func AtomicJob(c *Ctx, opt AtomicJobOptions) (*AtomicJobResult, error) {
 		return nil, err
 	}
 	return &AtomicJobResult{ID: id}, nil
-}
-
-// StaticAdvanced serves static assets with safe path handling, cache headers,
-// ETag, Last-Modified, Range support, SPA fallback, and download disposition.
-type StaticAdvancedConfig struct {
-	ETag         bool
-	LastModified bool
-	CacheControl string
-	Immutable    bool
-	Index        bool
-	SPAFallback  string
-	Download     bool
-}
-
-func StaticAdvanced(root string, cfg StaticAdvancedConfig) HandlerFunc {
-	fsroot := filepath.Clean(root)
-	return func(c *Ctx) error {
-		rel := strings.TrimPrefix(c.Param("*"), "/")
-		if rel == "" {
-			rel = strings.TrimPrefix(c.Path(), "/")
-		}
-		clean := filepath.Clean("/" + rel)
-		full := filepath.Join(fsroot, strings.TrimPrefix(clean, "/"))
-		if !strings.HasPrefix(full, fsroot) {
-			return c.Status(StatusForbidden).SendString("forbidden")
-		}
-		st, err := os.Stat(full)
-		if err != nil && cfg.SPAFallback != "" {
-			full = filepath.Join(fsroot, cfg.SPAFallback)
-			st, err = os.Stat(full)
-		}
-		if err != nil {
-			return c.SendStatus(StatusNotFound)
-		}
-		if st.IsDir() {
-			if !cfg.Index {
-				return c.SendStatus(StatusForbidden)
-			}
-			full = filepath.Join(full, "index.html")
-			st, err = os.Stat(full)
-			if err != nil {
-				return c.SendStatus(StatusNotFound)
-			}
-		}
-		data, err := os.ReadFile(full)
-		if err != nil {
-			return err
-		}
-		if ct := mime.TypeByExtension(filepath.Ext(full)); ct != "" {
-			c.Type(ct)
-		}
-		if cfg.CacheControl != "" {
-			c.Set("Cache-Control", cfg.CacheControl)
-		} else if cfg.Immutable {
-			c.Set("Cache-Control", "public, max-age=31536000, immutable")
-		}
-		if cfg.LastModified {
-			c.Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
-		}
-		if cfg.ETag {
-			sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", full, st.Size(), st.ModTime().UnixNano())))
-			etag := "\"" + hex.EncodeToString(sum[:8]) + "\""
-			c.Set("ETag", etag)
-			if c.Get("If-None-Match") == etag {
-				return c.SendStatus(StatusNotModified)
-			}
-		}
-		if cfg.Download {
-			c.Set("Content-Disposition", "attachment; filename=\""+filepath.Base(full)+"\"")
-		}
-		return c.SendBytes(data)
-	}
 }
 
 // parseHeadersLimit is app-configurable while preserving parseHeaders for tests.

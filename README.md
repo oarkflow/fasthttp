@@ -597,14 +597,14 @@ This version adds an extension layer for modern HTTP server and application-runt
 
 Added capabilities include:
 
-- `Reliable(policy)` per-route reliability middleware.
-- `ReliableEndpoint[Req, Res]` typed reliable endpoint abstraction.
-- Built-in metrics with `app.EnableMetrics("/_fh/metrics")`.
-- Reverse proxy and API gateway handlers with `ReverseProxy` and `APIGateway`.
-- Circuit breaker middleware with `CircuitBreakerMiddleware`.
+- `reliability.New(policy)` per-route reliability middleware from `mw/reliability`.
+- `reliability.Endpoint[Req, Res]` typed reliable endpoint abstraction under `mw/reliability`.
+- Built-in metrics under `mw/metrics`.
+- Reverse proxy and API gateway handlers under `mw/proxy`.
+- Circuit breaker middleware under `mw/circuitbreaker`.
 - Native SSE using `ctx.SSE`.
-- Advanced static file handler through `StaticAdvanced` / `StaticFilesAdvanced`.
-- First-class access logs using `AccessLog` with JSON/common modes.
+- Advanced static file handler through `static.New` under `mw/static`.
+- First-class access logs under `mw/logger`.
 - Transactional reliability API through `Reliability.BeginTx`.
 - Outbox and inbox helpers for reliable event publishing and webhook dedupe.
 - Dead-letter queue retry/discard helpers for file-backed queue storage.
@@ -622,3 +622,8 @@ Added capabilities include:
 - API evolution/version compatibility middleware.
 
 See `examples/advanced-platform` for a runnable end-to-end example.
+
+Middleware is organized exclusively under `mw/*`. Root-package response handlers
+and reliability runtime adapters remain in the core because they require private
+server state; reusable request-chain middleware belongs in its matching `mw`
+package.

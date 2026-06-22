@@ -24,7 +24,8 @@ type Config struct {
 	MaxAge          int
 	PreflightStatus int
 
-	OriginStore OriginStore
+	OriginStore     OriginStore
+	AllowOriginFunc func(ctx *fh.Ctx, origin string) bool
 
 	Next func(ctx *fh.Ctx) bool
 }
@@ -83,6 +84,9 @@ func New(config ...Config) fh.HandlerFunc {
 		}
 
 		allowed := cfg.OriginStore.Allowed(origin)
+		if cfg.AllowOriginFunc != nil {
+			allowed = cfg.AllowOriginFunc(ctx, origin)
+		}
 		if !allowed {
 			return ctx.Next()
 		}
@@ -160,6 +164,9 @@ func mergeConfig(base Config, override Config) Config {
 	}
 	if override.OriginStore != nil {
 		base.OriginStore = override.OriginStore
+	}
+	if override.AllowOriginFunc != nil {
+		base.AllowOriginFunc = override.AllowOriginFunc
 	}
 	if override.Next != nil {
 		base.Next = override.Next

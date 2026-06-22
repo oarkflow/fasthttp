@@ -14,7 +14,7 @@ Implemented or wired in the runtime:
 - Graceful shutdown and timeout shutdown.
 - Drain mode through shutdown: closes idle connections and sends HTTP/2 drain.
 - Connection lifecycle hooks: `OnConnect`, `OnClose`, `OnListen`, `OnShutdown`, `OnError`.
-- Request lifecycle hooks: `fh.LifecycleHooks`.
+- Request lifecycle hooks: `mw/lifecycle`.
 
 Best practice defaults:
 
@@ -62,13 +62,12 @@ Native or included middleware/helpers:
 - Basic auth via `mw/basicauth`.
 - Request ID via `mw/requestid`.
 - Rate limiting via `mw/ratelimiter`.
-- Body limit via `fh.BodyLimit` and `mw/bodylimit`.
-- Request timeout via `fh.RequestTimeout` and `mw/timeout`.
-- API key middleware: `fh.APIKey`.
-- IP allow/block list: `fh.IPList`.
-- HMAC signed requests: `fh.HMACSignedRequest`.
-- HMAC webhook verification: `fh.HMACWebhook`.
-- Replay protection with in-memory store and pluggable `ReplayProtectionStore`.
+- Body limit via `mw/bodylimit`.
+- Request timeout via `mw/timeout`.
+- API key middleware via `mw/apikey`.
+- IP allow/block list via `mw/ipwhitelist`.
+- HMAC signed requests and webhooks via `mw/signature`.
+- Replay protection with an in-memory or pluggable store via `mw/replay`.
 - Constant-time compare: `fh.ConstantTimeEqual`.
 - Secret redaction: `fh.RedactSecret`.
 - Signed cookie helpers: `fh.SignCookie`, `fh.VerifySignedCookie`.
@@ -80,10 +79,10 @@ Recommended edge chain:
 app.Use(requestid.New())
 app.Use(security.New())
 app.Use(cors.New(cors.Config{AllowOrigins: []string{"https://app.example.com"}}))
-app.Use(fh.BodyLimit(1 << 20))
-app.Use(fh.RequestTimeout(5 * time.Second))
-app.Use(fh.APIKey(fh.APIKeyConfig{Header: "X-API-Key", Keys: keys}))
-app.Use(fh.ReplayProtection(nil, "X-Nonce", 5*time.Minute))
+app.Use(bodylimit.New(1 << 20))
+app.Use(timeout.New(5 * time.Second))
+app.Use(apikey.New(apikey.Config{Header: "X-API-Key", Keys: keys}))
+app.Use(replay.New(replay.Config{Header: "X-Nonce", TTL: 5*time.Minute}))
 ```
 
 ## 4. Reliability, idempotency, queues, and jobs
@@ -112,7 +111,7 @@ Per-route reliability:
 
 ```go
 app.Post("/orders",
-    fh.Reliable(fh.ReliabilityPolicy{
+    reliabilitymw.New(fh.ReliabilityPolicy{
         Enabled:             true,
         RequireIdempotency:  true,
         Journal:             true,
@@ -128,10 +127,10 @@ Deterministic idempotency:
 
 ```go
 app.Post("/payments",
-    fh.DeterministicIdempotency(func(c *fh.Ctx) string {
+    idempotency.New(func(c *fh.Ctx) string {
         return c.Get("X-Tenant-ID") + ":payment:" + c.Get("X-External-ID")
     }),
-    fh.Reliable(paymentPolicy),
+    reliabilitymw.New(paymentPolicy),
     createPayment,
 )
 ```
@@ -139,7 +138,7 @@ app.Post("/payments",
 Durable async endpoint:
 
 ```go
-app.Post("/emails", fh.Reliable(emailPolicy), func(c *fh.Ctx) error {
+app.Post("/emails", reliabilitymw.New(emailPolicy), func(c *fh.Ctx) error {
     job, err := fh.AtomicJob(c, fh.AtomicJobOptions{
         Type:     "email.send",
         Body:     c.BodyCopy(),
@@ -156,8 +155,8 @@ SQLite and Postgres should be provided as separate adapters implementing the sto
 
 Available native gateway pieces:
 
-- `fh.ReverseProxy(fh.ProxyConfig{...})`.
-- `fh.APIGateway(map[string]fh.ProxyConfig{...})`.
+- `proxy.New(proxy.Config{...})`.
+- `proxy.Gateway(map[string]proxy.Config{...})`.
 - Path strip/add rewrite.
 - Header/director rewrite.
 - Per-upstream timeout.
@@ -195,7 +194,7 @@ Use SSE for job progress, queue stats, workflow progress, log streaming, and adm
 
 ## 7. Static files and assets
 
-`fh.StaticAdvanced` adds:
+`mw/static.New` adds:
 
 - Safe path cleaning and path traversal protection.
 - ETag.
@@ -207,7 +206,7 @@ Use SSE for job progress, queue stats, workflow progress, log streaming, and adm
 - SPA fallback.
 
 ```go
-app.Get("/static/*", fh.StaticAdvanced("./public", fh.StaticAdvancedConfig{
+app.Get("/static/*", staticmw.New("./public", staticmw.Config{
     ETag: true,
     LastModified: true,
     CacheControl: "public, max-age=31536000, immutable",
@@ -216,13 +215,13 @@ app.Get("/static/*", fh.StaticAdvanced("./public", fh.StaticAdvancedConfig{
 
 ## 8. API versioning and deprecation
 
-Use `fh.APIVersion` with `fh.APIVersionConfig`:
+Use `mw/apiversion`:
 
 ```go
-app.Use(fh.APIVersion(fh.APIVersionConfig{
+app.Use(apiversion.New(apiversion.Config{
     Header:  "Accept-Version",
     Default: "2026-06-01",
-    Allowed: []string{"2026-01-01", "2026-06-01"},
+    Supported: []string{"2026-01-01", "2026-06-01"},
     Deprecated: map[string]string{"2026-01-01": "2026-12-31"},
 }))
 ```
@@ -237,7 +236,7 @@ Native DX endpoints and helpers:
 - `app.EnableRouteList("/_fh/routes")`.
 - `app.EnableOpenAPI("/openapi.json", ...)`.
 - `app.EnableDocs("/docs")`.
-- `app.EnableMetrics("/_fh/metrics")`.
+- `m := metrics.New(); app.Use(m.Middleware()); app.Get("/_fh/metrics", m.Handler())`.
 - Existing test helpers and benchmark files remain.
 - Mockable queue/journal interfaces.
 - `fh doctor` can be added as a CLI wrapper around config validation and route inspection.
