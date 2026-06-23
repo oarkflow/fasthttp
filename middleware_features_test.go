@@ -57,6 +57,18 @@ func TestBodyLimitGlobalAndEndpoint(t *testing.T) {
 	if code != fh.StatusOK {
 		t.Fatalf("allowed status = %d", code)
 	}
+
+	boundary := fh.New()
+	boundary.Post("/json", bodylimit.New(100), func(c *fh.Ctx) error { return c.SendString("ok") })
+	boundaryAddr := testServer(t, boundary)
+	code, _, _ = request(t, boundaryAddr, "POST", "/json", strings.Repeat("a", 100), map[string]string{"Content-Type": "application/json"})
+	if code != fh.StatusOK {
+		t.Fatalf("boundary status = %d", code)
+	}
+	code, _, _ = request(t, boundaryAddr, "POST", "/json", strings.Repeat("a", 101), map[string]string{"Content-Type": "application/json"})
+	if code != fh.StatusPayloadTooLarge {
+		t.Fatalf("over boundary status = %d", code)
+	}
 }
 
 func TestRewriteAndLoopProtection(t *testing.T) {

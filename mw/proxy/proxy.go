@@ -57,6 +57,9 @@ func New(cfg Config) fh.HandlerFunc {
 		if writer.err != nil && cfg.ErrorHandler != nil {
 			return cfg.ErrorHandler(c, writer.err)
 		}
+		if writer.err == nil && writer.wroteHeader && !c.Responded() {
+			return c.SendStatus(writer.status)
+		}
 		return writer.err
 	}
 }
@@ -95,14 +98,16 @@ func request(c *fh.Ctx, target *url.URL) (*http.Request, error) {
 }
 
 type responseWriter struct {
-	ctx    *fh.Ctx
-	header http.Header
-	status int
-	err    error
+	ctx         *fh.Ctx
+	header      http.Header
+	status      int
+	err         error
+	wroteHeader bool
 }
 
 func (w *responseWriter) Header() http.Header { return w.header }
 func (w *responseWriter) WriteHeader(status int) {
+	w.wroteHeader = true
 	w.status = status
 	for key, values := range w.header {
 		for _, value := range values {

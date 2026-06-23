@@ -1,6 +1,7 @@
 package circuitbreaker
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -54,6 +55,10 @@ func (b *Breaker) Handler() fh.HandlerFunc {
 		b.mu.Unlock()
 		err := c.Next()
 		failed := err != nil || c.StatusCode() >= 500
+		var httpErr *fh.HTTPError
+		if errors.As(err, &httpErr) {
+			failed = httpErr.Status >= 500
+		}
 		if b.cfg.IsFailure != nil {
 			failed = b.cfg.IsFailure(c, err)
 		}

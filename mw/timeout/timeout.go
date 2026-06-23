@@ -14,7 +14,7 @@ func New(d time.Duration) fh.HandlerFunc {
 		defer cancel()
 		ctx.SetContext(deadline)
 		err := ctx.Next()
-		if errors.Is(deadline.Err(), context.DeadlineExceeded) && !ctx.Responded() {
+		if errors.Is(deadline.Err(), context.DeadlineExceeded) {
 			return ctx.Status(503).SendString("Request Timeout")
 		}
 		return err

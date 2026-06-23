@@ -93,6 +93,7 @@ type Ctx struct {
 	locals        [16]localEntry
 	lcount        int
 	localOverflow map[string]any
+	localsMu      sync.Mutex
 
 	readBuf  *[]byte
 	writeBuf *[]byte
@@ -492,6 +493,8 @@ func (c *Ctx) Hostname() string {
 }
 
 func (c *Ctx) Locals(key string, value ...any) any {
+	c.localsMu.Lock()
+	defer c.localsMu.Unlock()
 	if len(value) > 0 {
 		for i := 0; i < c.lcount; i++ {
 			if c.locals[i].key == key {

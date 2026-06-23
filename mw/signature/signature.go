@@ -45,6 +45,12 @@ func New(config Config) fh.HandlerFunc {
 		}
 		ts := c.Get(config.TimestampHeader)
 		sig := strings.TrimSpace(c.Get(config.SignatureHeader))
+		if parsedTS, parsedSig, ok := parseCombinedSignature(sig); ok {
+			if ts == "" {
+				ts = parsedTS
+			}
+			sig = parsedSig
+		}
 		if config.Scheme != "" {
 			sig = strings.TrimPrefix(sig, config.Scheme)
 		}
@@ -88,6 +94,22 @@ func New(config Config) fh.HandlerFunc {
 		}
 		return fh.NewHTTPError(fh.StatusUnauthorized, "SIGNATURE_INVALID", "signature is invalid")
 	}
+}
+
+func parseCombinedSignature(value string) (timestamp, signature string, ok bool) {
+	for _, part := range strings.Split(value, ",") {
+		key, val, found := strings.Cut(strings.TrimSpace(part), "=")
+		if !found {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "t":
+			timestamp = strings.TrimSpace(val)
+		case "sig", "v1":
+			signature = strings.TrimSpace(val)
+		}
+	}
+	return timestamp, signature, timestamp != "" && signature != ""
 }
 
 func parseTimestamp(value string) (time.Time, error) {

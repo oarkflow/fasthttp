@@ -234,13 +234,13 @@ curl -X POST -d '{"short":"ok"}' -H 'Content-Type: application/json' http://loca
 ```
 
 ```json
-{"size":13}
+{"size":14}
 ```
 
 **Over limit (413):**
 
 ```bash
-curl -X POST -d '{"data":"this exceeds the 100 byte ceiling for this route and will be rejected"}' -H 'Content-Type: application/json' http://localhost:3000/demo/body-limit
+curl -i -X POST -d '{"data":"this exceeds the 100 byte ceiling for this route and will be rejected with enough extra bytes"}' -H 'Content-Type: application/json' http://localhost:3000/demo/body-limit
 ```
 
 ```
@@ -257,8 +257,12 @@ Returns a timeout error if the handler exceeds 100ms.
 app.Get("/demo/timeout",
     timeout.New(100*time.Millisecond),
     func(c *fh.Ctx) error {
-        time.Sleep(200 * time.Millisecond)
-        return c.SendString("too slow")
+        select {
+        case <-time.After(200 * time.Millisecond):
+            return c.SendString("too slow")
+        case <-c.Context().Done():
+            return c.Context().Err()
+        }
     },
 )
 ```
@@ -268,7 +272,7 @@ curl -i http://localhost:3000/demo/timeout
 ```
 
 ```
-HTTP/1.1 408 Request Timeout
+HTTP/1.1 503 Service Unavailable
 ```
 
 ---
@@ -627,32 +631,161 @@ lifecycle end request=req_abc... status=200
 
 ### 22. Workflow
 
-Sequential pipeline: step_one → step_two → async job (step_three) → respond.
+The workflow middleware supports **linear steps**, **conditional steps**, **branching** (first-match
+sub-workflow routing), and **parallel fan-out** (concurrent sub-workflow execution).
+
+#### 22a. Basic Linear Workflow
+
+Sequential pipeline: validate → process → async job → respond.
 
 ```go
-wf := workflow.New("demo-workflow").
-    Use("step_one", func(c *fh.Ctx) error { c.Locals("step1", "done"); return nil }).
-    Use("step_two", func(c *fh.Ctx) error { c.Locals("step2", "done"); return nil }).
-    Job("step_three", "demo.process").
-    Use("respond", func(c *fh.Ctx) error {
-        return c.JSON(fh.Map{"message": "workflow completed", "step1": c.Locals("step1"), "step2": c.Locals("step2"), "job_id": c.Locals("job_id")})
-    })
-
-app.Post("/demo/workflow", wf.Handler())
+app.Post("/demo/workflow/basic",
+    workflow.New("basic").
+        Use("validate", func(c *fh.Ctx) error { c.Locals("validated", true); return nil }).
+        Use("process", func(c *fh.Ctx) error { c.Locals("processed", true); return nil }).
+        Job("queue", "demo.process").
+        Use("respond", func(c *fh.Ctx) error {
+            return c.JSON(fh.Map{"type": "basic", "valid": c.Locals("validated"), "done": c.Locals("processed"), "job_id": c.Locals("job_id")})
+        }).Handler(),
+)
 ```
 
 ```bash
-curl -X POST http://localhost:3000/demo/workflow
+curl -X POST http://localhost:3000/demo/workflow/basic
 ```
 
 ```json
-{"job_id":"job_abc...","message":"workflow completed","step1":"done","step2":"done"}
+{"done":true,"job_id":"job_abc...","type":"basic","valid":true}
 ```
 
-Server also logs async job processing:
+Server logs the async job:
 ```
-processing workflow job=job_abc... payload={"workflow":"demo-workflow","step":"step_three",...}
+processing workflow job=job_abc... payload={"workflow":"basic","step":"queue",...}
 ```
+
+#### 22b. Conditional Steps
+
+Steps can have a condition function. The step is skipped when the condition returns `false`.
+
+```go
+app.Post("/demo/workflow/conditional",
+    workflow.New("conditional").
+        Use("validate", func(c *fh.Ctx) error { c.Locals("validated", true); return nil }).
+        Use("apply_discount", func(c *fh.Ctx) error {
+            c.Locals("discount", "10%"); return nil
+        }, func(c *fh.Ctx) bool { return c.Get("X-Plan") == "vip" }).
+        Use("apply_standard", func(c *fh.Ctx) error {
+            c.Locals("discount", "0%"); return nil
+        }, func(c *fh.Ctx) bool { return c.Get("X-Plan") != "vip" }).
+        Use("respond", func(c *fh.Ctx) error {
+            return c.JSON(fh.Map{"type": "conditional", "plan": c.Get("X-Plan"), "discount": c.Locals("discount")})
+        }).Handler(),
+)
+```
+
+```bash
+curl -s -H 'X-Plan: vip' http://localhost:3000/demo/workflow/conditional
+```
+
+```json
+{"discount":"10%","plan":"vip","type":"conditional"}
+```
+
+```bash
+curl -s -H 'X-Plan: standard' http://localhost:3000/demo/workflow/conditional
+```
+
+```json
+{"discount":"0%","plan":"standard","type":"conditional"}
+```
+
+#### 22c. Branching (First-Match Sub-Workflow Routing)
+
+`Branch` evaluates sub-workflows in order. The first sub-workflow whose `Condition` returns
+`true` is executed (with all its steps). If none match, a catch-all (no condition) sub-workflow
+can handle the default case.
+
+```go
+app.Post("/demo/workflow/branch",
+    workflow.New("branching").
+        Use("validate", func(c *fh.Ctx) error { c.Locals("validated", true); return nil }).
+        Branch("routing",
+            workflow.New("vip_branch").Condition(func(c *fh.Ctx) bool {
+                return c.Get("X-Plan") == "vip"
+            }).Use("handler", func(c *fh.Ctx) error { c.Locals("route", "vip"); return nil }),
+            workflow.New("standard_branch").Condition(func(c *fh.Ctx) bool {
+                return c.Get("X-Plan") == "standard"
+            }).Use("handler", func(c *fh.Ctx) error { c.Locals("route", "standard"); return nil }),
+            workflow.New("default_branch").Use("handler", func(c *fh.Ctx) error {
+                c.Locals("route", "default"); return nil
+            }),
+        ).
+        Use("respond", func(c *fh.Ctx) error {
+            return c.JSON(fh.Map{"type": "branch", "plan": c.Get("X-Plan"), "route": c.Locals("route")})
+        }).Handler(),
+)
+```
+
+```bash
+curl -s -H 'X-Plan: vip' http://localhost:3000/demo/workflow/branch
+```
+
+```json
+{"plan":"vip","route":"vip","type":"branch"}
+```
+
+```bash
+curl -s -H 'X-Plan: standard' http://localhost:3000/demo/workflow/branch
+```
+
+```json
+{"plan":"standard","route":"standard","type":"branch"}
+```
+
+```bash
+curl -s -H 'X-Plan: other' http://localhost:3000/demo/workflow/branch
+```
+
+```json
+{"plan":"other","route":"default","type":"branch"}
+```
+
+#### 22d. Parallel Fan-Out
+
+`Parallel` runs all sub-workflows concurrently. Each branch can have its own linear steps and
+async jobs. `Ctx.Locals()` is thread-safe (backed by a mutex) so parallel branches can safely
+set and read locals.
+
+```go
+app.Post("/demo/workflow/parallel",
+    workflow.New("parallel").
+        Use("validate", func(c *fh.Ctx) error { c.Locals("validated", true); return nil }).
+        Parallel("fan_out",
+            workflow.New("fulfillment").
+                Use("reserve", func(c *fh.Ctx) error { c.Locals("fulfillment_ok", true); return nil }).
+                Job("ship", "fulfillment.ship"),
+            workflow.New("billing").
+                Use("charge", func(c *fh.Ctx) error { c.Locals("billing_ok", true); return nil }).
+                Job("invoice", "billing.invoice"),
+            workflow.New("notifications").
+                Use("notify", func(c *fh.Ctx) error { c.Locals("notify_ok", true); return nil }).
+                Job("send", "notification.send"),
+        ).
+        Use("respond", func(c *fh.Ctx) error {
+            return c.JSON(fh.Map{"type": "parallel", "fulfillment": c.Locals("fulfillment_ok"), "billing": c.Locals("billing_ok"), "notification": c.Locals("notify_ok")})
+        }).Handler(),
+)
+```
+
+```bash
+curl -X POST http://localhost:3000/demo/workflow/parallel
+```
+
+```json
+{"billing":true,"fulfillment":true,"notification":true,"type":"parallel"}
+```
+
+All three branches run concurrently; the server logs show all async jobs enqueued:
 
 ---
 
@@ -729,7 +862,7 @@ app.Get("/metrics", ipwhitelist.New("127.0.0.1/32", "::1/128"), requests.Handler
 ```
 
 ```bash
-curl http://localhost:3000/metrics
+curl http://localhost:3000/metrics?format=prometheus
 ```
 
 ```
@@ -1126,7 +1259,10 @@ curl -i -X POST -H 'X-Webhook-ID: evt_123' -H 'Content-Type: application/json' -
 | 20 | URL Rewriting | Global | `GET /old-api/hello` |
 | 21 | Idempotency | Per-route | `POST /demo/idempotency` |
 | 22 | Lifecycle Hooks | Per-route | `POST /demo/lifecycle` |
-| 23 | Workflow | Per-route | `POST /demo/workflow` |
+| 23a | Workflow (basic) | Per-route | `POST /demo/workflow/basic` |
+| 23b | Workflow (conditional) | Per-route | `POST /demo/workflow/conditional` |
+| 23c | Workflow (branch) | Per-route | `POST /demo/workflow/branch` |
+| 23d | Workflow (parallel) | Per-route | `POST /demo/workflow/parallel` |
 | 24 | Circuit Breaker | Per-route | `GET /demo/circuit-breaker` |
 | 25 | Reverse Proxy | Per-route | `/demo/proxy/*` |
 | 26 | Metrics | Global | `GET /metrics` |

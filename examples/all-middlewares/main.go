@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/oarkflow/fh"
@@ -53,7 +54,7 @@ func main() {
 	app := fh.New(fh.Config{
 		Reliability: fh.ReliabilityConfig{
 			Enabled:            true,
-			DataDir:            ".fh-data",
+			DataDir:            env("FH_DATA_DIR", ".fh-data"),
 			JournalEnabled:     true,
 			IdempotencyEnabled: true,
 			QueueEnabled:       true,
@@ -84,7 +85,7 @@ func main() {
 
 	// Global body size ceiling (1 MiB), skipped for health and static.
 	app.Use(skip.New(
-		bodylimit.New(1 << 20),
+		bodylimit.New(1<<20),
 		skip.Any(skip.Health(), skip.Static()),
 	))
 
@@ -119,7 +120,10 @@ func main() {
 	))
 
 	// Session middleware (signed cookies).
-	app.Use(session.New(sessionManager))
+	app.Use(skip.New(
+		session.New(sessionManager),
+		skip.Paths("/demo/cache"),
+	))
 
 	// ── Routes ──────────────────────────────────────────────────────────
 
@@ -197,8 +201,12 @@ func main() {
 	app.Get("/demo/timeout",
 		timeout.New(100*time.Millisecond),
 		func(c *fh.Ctx) error {
-			time.Sleep(200 * time.Millisecond)
-			return c.SendString("too slow")
+			select {
+			case <-time.After(200 * time.Millisecond):
+				return c.SendString("too slow")
+			case <-c.Context().Done():
+				return c.Context().Err()
+			}
 		},
 	)
 
@@ -215,7 +223,7 @@ func main() {
 		cachemw.New(cachemw.Config{TTL: 30 * time.Second, MaxEntries: 64}),
 		func(c *fh.Ctx) error {
 			return c.JSON(fh.Map{
-				"message":     "this response is cached for 30s",
+				"message":      "this response is cached for 30s",
 				"generated_at": time.Now().UTC().String(),
 			})
 		},
@@ -223,7 +231,7 @@ func main() {
 
 	// ── Gzip Compression ─────────────────────────────────────────────
 	app.Get("/demo/compress", func(c *fh.Ctx) error {
-		return c.SendString("this response will be gzip-compressed when the client sends Accept-Encoding: gzip")
+		return c.SendString(strings.Repeat("hello world! ", 100))
 	})
 
 	// ── CSRF Protection ──────────────────────────────────────────────
@@ -331,34 +339,136 @@ func main() {
 		log.Printf("processing workflow job=%s payload=%s", job.ID, job.Payload)
 		return nil
 	})
+	app.Queue().Register("fulfillment.ship", func(ctx context.Context, job *fh.QueueJob) error {
+		log.Printf("shipping fulfillment job=%s payload=%s", job.ID, job.Payload)
+		return nil
+	})
+	app.Queue().Register("billing.invoice", func(ctx context.Context, job *fh.QueueJob) error {
+		log.Printf("generating invoice job=%s payload=%s", job.ID, job.Payload)
+		return nil
+	})
+	app.Queue().Register("notification.send", func(ctx context.Context, job *fh.QueueJob) error {
+		log.Printf("sending notification job=%s payload=%s", job.ID, job.Payload)
+		return nil
+	})
 
-	wf := workflow.New("demo-workflow").
-		Use("step_one", func(c *fh.Ctx) error {
-			c.Locals("step1", "done")
+	// ── 1. Basic linear workflow ─────────────────────────────────────
+	basic := workflow.New("basic").
+		Use("validate", func(c *fh.Ctx) error {
+			c.Locals("validated", true)
 			return nil
 		}).
-		Use("step_two", func(c *fh.Ctx) error {
-			c.Locals("step2", "done")
+		Use("process", func(c *fh.Ctx) error {
+			c.Locals("processed", true)
 			return nil
 		}).
-		Job("step_three", "demo.process").
+		Job("queue", "demo.process").
 		Use("respond", func(c *fh.Ctx) error {
 			return c.JSON(fh.Map{
-				"message": "workflow completed",
-				"step1":   c.Locals("step1"),
-				"step2":   c.Locals("step2"),
-				"job_id":  c.Locals("job_id"),
+				"type":   "basic",
+				"valid":  c.Locals("validated"),
+				"done":   c.Locals("processed"),
+				"job_id": c.Locals("job_id"),
 			})
 		})
+	app.Post("/demo/workflow/basic", basic.Handler())
 
-	app.Post("/demo/workflow", wf.Handler())
+	// ── 2. Conditional steps ─────────────────────────────────────────
+	cond := workflow.New("conditional").
+		Use("validate", func(c *fh.Ctx) error {
+			c.Locals("validated", true)
+			return nil
+		}).
+		Use("apply_discount", func(c *fh.Ctx) error {
+			c.Locals("discount", "10%")
+			return nil
+		}, func(c *fh.Ctx) bool {
+			return c.Get("X-Plan") == "vip"
+		}).
+		Use("apply_standard", func(c *fh.Ctx) error {
+			c.Locals("discount", "0%")
+			return nil
+		}, func(c *fh.Ctx) bool {
+			return c.Get("X-Plan") != "vip"
+		}).
+		Use("respond", func(c *fh.Ctx) error {
+			return c.JSON(fh.Map{
+				"type":     "conditional",
+				"plan":     c.Get("X-Plan"),
+				"discount": c.Locals("discount"),
+			})
+		})
+	app.Post("/demo/workflow/conditional", cond.Handler())
+
+	// ── 3. Branching (if/else via sub-workflows) ─────────────────────
+	branch := workflow.New("branching").
+		Use("validate", func(c *fh.Ctx) error {
+			c.Locals("validated", true)
+			return nil
+		}).
+		Branch("routing",
+			workflow.New("vip_branch").Condition(func(c *fh.Ctx) bool {
+				return c.Get("X-Plan") == "vip"
+			}).Use("vip_handler", func(c *fh.Ctx) error {
+				c.Locals("route", "vip")
+				return nil
+			}).Job("vip_job", "notification.send"),
+			workflow.New("standard_branch").Condition(func(c *fh.Ctx) bool {
+				return c.Get("X-Plan") == "standard"
+			}).Use("standard_handler", func(c *fh.Ctx) error {
+				c.Locals("route", "standard")
+				return nil
+			}),
+			workflow.New("default_branch").Use("default_handler", func(c *fh.Ctx) error {
+				c.Locals("route", "default")
+				return nil
+			}),
+		).
+		Use("respond", func(c *fh.Ctx) error {
+			return c.JSON(fh.Map{
+				"type":  "branch",
+				"plan":  c.Get("X-Plan"),
+				"route": c.Locals("route"),
+			})
+		})
+	app.Post("/demo/workflow/branch", branch.Handler())
+
+	// ── 4. Parallel fan-out ──────────────────────────────────────────
+	parallel := workflow.New("parallel").
+		Use("validate", func(c *fh.Ctx) error {
+			c.Locals("validated", true)
+			return nil
+		}).
+		Parallel("fan_out",
+			workflow.New("fulfillment").Use("reserve", func(c *fh.Ctx) error {
+				c.Locals("fulfillment_ok", true)
+				return nil
+			}).Job("ship", "fulfillment.ship"),
+			workflow.New("billing").Use("charge", func(c *fh.Ctx) error {
+				c.Locals("billing_ok", true)
+				return nil
+			}).Job("invoice", "billing.invoice"),
+			workflow.New("notifications").Use("notify", func(c *fh.Ctx) error {
+				c.Locals("notify_ok", true)
+				return nil
+			}).Job("send", "notification.send"),
+		).
+		Use("respond", func(c *fh.Ctx) error {
+			return c.JSON(fh.Map{
+				"type":         "parallel",
+				"fulfillment":  c.Locals("fulfillment_ok"),
+				"billing":      c.Locals("billing_ok"),
+				"notification": c.Locals("notify_ok"),
+			})
+		})
+	app.Post("/demo/workflow/parallel", parallel.Handler())
 
 	// ── Circuit Breaker ──────────────────────────────────────────────
 	breaker := circuitbreaker.New(circuitbreaker.Config{
 		FailureThreshold: 2,
 		ResetAfter:       10 * time.Second,
 		IsFailure: func(c *fh.Ctx, err error) bool {
-			return c.StatusCode() >= 500
+			return err != nil || c.StatusCode() >= 500
 		},
 		OnOpen: func(c *fh.Ctx) error {
 			return fh.NewHTTPError(fh.StatusServiceUnavailable, "CIRCUIT_OPEN", "service temporarily unavailable")
@@ -415,7 +525,7 @@ func main() {
 	// ── Request journal ──────────────────────────────────────────────
 	app.Get("/demo/journal", func(c *fh.Ctx) error {
 		return c.JSON(fh.Map{
-			"message": "every request to this server is journaled via the global reliability middleware",
+			"message":    "every request to this server is journaled via the global reliability middleware",
 			"request_id": c.Locals("request_id"),
 		})
 	})
@@ -427,7 +537,7 @@ func main() {
 
 	// ── Named Routes ─────────────────────────────────────────────────
 	app.Get("/named-route-example", func(c *fh.Ctx) error {
-		url, _ := app.URL("demo.hello")
+		url, _ := app.URL("demo.hello", map[string]string{"name": "world"})
 		return c.JSON(fh.Map{"named_url": url})
 	})
 	app.Get("/hello/:name", func(c *fh.Ctx) error {
@@ -453,6 +563,15 @@ func main() {
 	// ── Content Negotiation (Codecs) ─────────────────────────────────
 	// Supports JSON, XML, form, multipart, CSV, NDJSON, text, binary.
 	app.Post("/demo/codecs", func(c *fh.Ctx) error {
+		if strings.Contains(c.Get("Content-Type"), "xml") {
+			var p struct {
+				Name string `xml:"name"`
+			}
+			if err := c.BodyParser(&p); err != nil {
+				return c.Status(400).SendString("BodyParser error: " + err.Error())
+			}
+			return c.JSON(fh.Map{"echo": fh.Map{"name": p.Name}, "content_type": c.Get("Content-Type")})
+		}
 		var p map[string]any
 		if err := c.BodyParser(&p); err != nil {
 			return c.Status(400).SendString("BodyParser error: " + err.Error())
@@ -519,5 +638,3 @@ func sourceDir() string {
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Dir(file)
 }
-
-
