@@ -36,6 +36,14 @@ func (g *Group) add(method, path string, handlers ...HandlerFunc) *Group {
 	return g
 }
 
+func (g *Group) addTyped(method, path string, handler any, middleware ...HandlerFunc) *Group {
+	all := make([]HandlerFunc, 0, len(g.middleware)+len(middleware))
+	all = append(all, g.middleware...)
+	all = append(all, middleware...)
+	g.app.addTyped(method, g.prefix+path, handler, all...)
+	return g
+}
+
 // Name names the most recently registered route in this group.
 func (g *Group) Name(name string) *Group {
 	g.app.Name(name)
@@ -80,6 +88,40 @@ func (g *Group) Trace(path string, handlers ...HandlerFunc) *Group {
 func (g *Group) All(path string, handlers ...HandlerFunc) *Group {
 	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
 		g.add(m, path, handlers...)
+	}
+	return g
+}
+
+func (g *Group) GetTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("GET", path, handler, middleware...)
+}
+func (g *Group) HeadTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("HEAD", path, handler, middleware...)
+}
+func (g *Group) PostTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("POST", path, handler, middleware...)
+}
+func (g *Group) PutTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("PUT", path, handler, middleware...)
+}
+func (g *Group) PatchTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("PATCH", path, handler, middleware...)
+}
+func (g *Group) DeleteTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("DELETE", path, handler, middleware...)
+}
+func (g *Group) OptionsTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("OPTIONS", path, handler, middleware...)
+}
+func (g *Group) ConnectTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("CONNECT", path, handler, middleware...)
+}
+func (g *Group) TraceTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	return g.addTyped("TRACE", path, handler, middleware...)
+}
+func (g *Group) AllTyped(path string, handler any, middleware ...HandlerFunc) *Group {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+		g.addTyped(m, path, handler, middleware...)
 	}
 	return g
 }

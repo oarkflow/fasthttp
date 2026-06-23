@@ -2,12 +2,10 @@ package fh
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"sort"
 	"strconv"
@@ -31,6 +29,12 @@ type StructuredError struct {
 //	func(*fh.Ctx, CreateUserRequest) (UserResponse, error)
 //
 // fh validates that shape at registration time and builds the parsing/encoding wrapper.
+func (a *App) GetTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("GET", path, handler, middleware...)
+}
+func (a *App) HeadTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("HEAD", path, handler, middleware...)
+}
 func (a *App) PostTyped(path string, handler any, middleware ...HandlerFunc) *App {
 	return a.addTyped("POST", path, handler, middleware...)
 }
@@ -43,12 +47,27 @@ func (a *App) PatchTyped(path string, handler any, middleware ...HandlerFunc) *A
 func (a *App) DeleteTyped(path string, handler any, middleware ...HandlerFunc) *App {
 	return a.addTyped("DELETE", path, handler, middleware...)
 }
+func (a *App) OptionsTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("OPTIONS", path, handler, middleware...)
+}
+func (a *App) ConnectTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("CONNECT", path, handler, middleware...)
+}
+func (a *App) TraceTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	return a.addTyped("TRACE", path, handler, middleware...)
+}
+func (a *App) AllTyped(path string, handler any, middleware ...HandlerFunc) *App {
+	for _, m := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE"} {
+		a.addTyped(m, path, handler, middleware...)
+	}
+	return a
+}
 
 func (a *App) addTyped(method, path string, handler any, middleware ...HandlerFunc) *App {
 	hv := reflect.ValueOf(handler)
 	ht := hv.Type()
-	ctxType := reflect.TypeOf(&Ctx{})
-	errType := reflect.TypeOf((*error)(nil)).Elem()
+	ctxType := reflect.TypeFor[*Ctx]()
+	errType := reflect.TypeFor[error]()
 	if ht.Kind() != reflect.Func || ht.NumIn() != 2 || ht.In(0) != ctxType || ht.NumOut() != 2 || !ht.Out(1).Implements(errType) {
 		panic("fh: typed handler must be func(*fh.Ctx, Req) (Res, error)")
 	}
@@ -479,20 +498,4 @@ func parseHeadersLimit(src []byte, h *RequestHeader, maxCount int) (int, error) 
 		return 0, ErrMalformedRequest
 	}
 	return n, nil
-}
-
-func randomToken(n int) string {
-	b := make([]byte, n)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func rawQuery(c *Ctx) string {
-	u := string(c.Header.URI)
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		return u[i+1:]
-	}
-	return ""
 }
