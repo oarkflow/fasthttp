@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Codec unmarshals request bodies for a content type.
@@ -295,6 +296,20 @@ func EncodeBody(contentType string, v any) ([]byte, error) {
 }
 
 func matchCodec(contentType string) Codec {
+	// Lock-free common hot paths. Exact lowercase content types are what the
+	// parser sees in benchmark and normal API traffic most of the time.
+	switch contentType {
+	case "application/json":
+		return jsonCodec{}
+	case "application/x-www-form-urlencoded":
+		return formCodec{}
+	case "text/plain":
+		return textCodec{ct: "text/plain"}
+	case "application/xml", "text/xml":
+		return xmlCodec{}
+	case "application/octet-stream":
+		return binaryCodec{ct: "application/octet-stream"}
+	}
 	ct := normalizeContentType(contentType)
 	if ct == "" {
 		return nil
@@ -412,11 +427,18 @@ type JSONEngine interface {
 // that do not want to depend on encoding/json.RawMessage.
 type JSONRawMessage []byte
 
+type jsonEngineBox struct {
+	engine JSONEngine
+}
+
 var (
-	jsonEngineMu sync.RWMutex
-	jsonEngine   JSONEngine = stdJSONEngine{}
-	jsonBytePool            = sync.Pool{New: func() any { b := make([]byte, 0, 1024); return &b }}
+	jsonEnginePtr atomic.Pointer[jsonEngineBox]
+	jsonBytePool  = sync.Pool{New: func() any { b := make([]byte, 0, 1024); return &b }}
 )
+
+func init() {
+	jsonEnginePtr.Store(&jsonEngineBox{engine: stdJSONEngine{}})
+}
 
 // SetJSONEngine swaps the JSON backend used by application/json, text/json,
 // application/problem+json, application/ld+json, and +json suffix matching.
@@ -425,9 +447,7 @@ func SetJSONEngine(engine JSONEngine) error {
 	if engine == nil {
 		return errors.New("json: nil JSON engine")
 	}
-	jsonEngineMu.Lock()
-	jsonEngine = engine
-	jsonEngineMu.Unlock()
+	jsonEnginePtr.Store(&jsonEngineBox{engine: engine})
 	return nil
 }
 
@@ -440,17 +460,12 @@ func MustSetJSONEngine(engine JSONEngine) {
 
 // ResetJSONEngine restores the compatibility backend.
 func ResetJSONEngine() {
-	jsonEngineMu.Lock()
-	jsonEngine = stdJSONEngine{}
-	jsonEngineMu.Unlock()
+	jsonEnginePtr.Store(&jsonEngineBox{engine: stdJSONEngine{}})
 }
 
 // CurrentJSONEngine returns the active JSON backend.
 func CurrentJSONEngine() JSONEngine {
-	jsonEngineMu.RLock()
-	engine := jsonEngine
-	jsonEngineMu.RUnlock()
-	return engine
+	return jsonEnginePtr.Load().engine
 }
 
 // JSONMarshal is a convenience wrapper over the active JSON engine with the same
@@ -529,20 +544,11 @@ type stdJSONEngine struct{}
 func (stdJSONEngine) Marshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 func (stdJSONEngine) Unmarshal(data []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	var extra any
-	err := dec.Decode(&extra)
-	if err == io.EOF {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return errors.New("multiple top-level JSON values")
+	// Use the stdlib fast path. The previous Decoder+UseNumber+extra-value
+	// validation path was substantially slower and allocation-heavy for ordinary
+	// API DTOs. Applications that require strict streaming semantics can install
+	// a custom JSONEngine at startup.
+	return json.Unmarshal(data, v)
 }
 
 func (stdJSONEngine) NewEncoder(w io.Writer) JSONEncoder { return json.NewEncoder(w) }

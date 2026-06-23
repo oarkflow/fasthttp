@@ -296,77 +296,110 @@ func strBytesEqualFold(a string, b []byte) bool {
 // parseRequestLine parses "METHOD URI HTTP/1.x\r\n".
 // Returns bytes consumed or error.
 func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error) {
-	// Find end of request line
-	lineEnd := bytes.Index(buf, strCRLF)
+	// Manual request-line parser. It avoids three bytes.Index calls and validates
+	// the target while scanning once. This is on every request, including the
+	// benchmark hot path.
+	limit := len(buf)
+	if maxLineSize > 0 && limit > maxLineSize+2 {
+		limit = maxLineSize + 2
+	}
+	lineEnd := -1
+	for i := 0; i+1 < limit; i++ {
+		if buf[i] == '\r' && buf[i+1] == '\n' {
+			lineEnd = i
+			break
+		}
+	}
 	if lineEnd < 0 {
-		if len(buf) > maxLineSize {
+		if maxLineSize > 0 && len(buf) > maxLineSize {
 			return 0, ErrRequestLineTooLarge
 		}
 		return 0, ErrMalformedRequest
 	}
-	if lineEnd > maxLineSize {
+	if maxLineSize > 0 && lineEnd > maxLineSize {
 		return 0, ErrRequestLineTooLarge
 	}
 	line := buf[:lineEnd]
-	i := bytes.IndexByte(line, ' ')
-	if i < 0 {
+	sp1 := -1
+	for i, c := range line {
+		if c == ' ' {
+			sp1 = i
+			break
+		}
+	}
+	if sp1 <= 0 {
 		return 0, ErrMalformedRequest
 	}
-	h.Method = line[:i]
-	if len(h.Method) == 0 || !validToken(h.Method) {
+	method := line[:sp1]
+	if !validToken(method) {
 		return 0, ErrMalformedRequest
 	}
-	line = line[i+1:]
-
-	j := bytes.IndexByte(line, ' ')
-	if j < 0 {
+	sp2 := -1
+	for i := sp1 + 1; i < len(line); i++ {
+		if line[i] == ' ' {
+			sp2 = i
+			break
+		}
+	}
+	if sp2 <= sp1+1 || sp2 == len(line)-1 {
 		return 0, ErrMalformedRequest
 	}
-	h.URI = line[:j]
-	for _, c := range h.URI {
+	target := line[sp1+1 : sp2]
+	proto := line[sp2+1:]
+	if !bytes.Equal(proto, strHTTP11) && !bytes.Equal(proto, strHTTP10) {
+		return 0, NewHTTPError(505, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
+	}
+	validTarget := target[0] == '/'
+	if !validTarget {
+		if methodIs(method, 'O', 'P', 'T', 'I', 'O', 'N', 'S') && len(target) == 1 && target[0] == '*' {
+			validTarget = true
+		} else if methodIs(method, 'C', 'O', 'N', 'N', 'E', 'C', 'T') && bytes.IndexByte(target, '/') < 0 {
+			validTarget = true
+		} else if absIdx := bytes.Index(target, []byte("://")); absIdx > 0 && absIdx+3 < len(target) {
+			validTarget = true
+			for _, c := range target[:absIdx] {
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
+					validTarget = false
+					break
+				}
+			}
+		}
+	}
+	if !validTarget {
+		return 0, ErrMalformedRequest
+	}
+	for _, c := range target {
 		if c <= 0x20 || c == 0x7f || c == '#' {
 			return 0, ErrMalformedRequest
 		}
 	}
-	validTarget := len(h.URI) > 0 && h.URI[0] == '/'
-	if bytesEqualFold(h.Method, MethodOPTIONSBytes) && bytes.Equal(h.URI, []byte("*")) {
-		validTarget = true
+	h.Method, h.URI, h.Proto = method, target, proto
+	h.KeepAlive = len(proto) == len(strHTTP11) && bytes.Equal(proto, strHTTP11)
+	return lineEnd + 2, nil
+}
+
+func methodIs(m []byte, a byte, rest ...byte) bool {
+	if len(m) != 1+len(rest) {
+		return false
 	}
-	if bytesEqualFold(h.Method, MethodCONNECTBytes) && len(h.URI) > 0 && bytes.IndexByte(h.URI, '/') < 0 {
-		validTarget = true
+	if m[0] != a {
+		return false
 	}
-	if !validTarget {
-		// RFC 9112 §3.2.2: absolute-form (e.g., GET http://example.com/path HTTP/1.1)
-		if absIdx := bytes.Index(h.URI, []byte("://")); absIdx > 0 {
-			scheme := h.URI[:absIdx]
-			ok := len(scheme) > 0
-			for _, c := range scheme {
-				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
-					ok = false
-					break
-				}
-			}
-			if ok && absIdx+3 < len(h.URI) {
-				validTarget = true
-			}
+	for i, c := range rest {
+		if m[i+1] != c {
+			return false
 		}
 	}
-	if !validTarget {
-		return 0, ErrMalformedRequest
-	}
-	line = line[j+1:]
-
-	h.Proto = line
-	if !bytes.Equal(h.Proto, strHTTP11) && !bytes.Equal(h.Proto, strHTTP10) {
-		return 0, NewHTTPError(505, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
-	}
-	h.KeepAlive = bytes.Equal(h.Proto, strHTTP11)
-	return lineEnd + 2, nil
+	return true
 }
 
 // parseHeaders parses all headers until the blank line.
 // All slices point into src — zero allocation.
 func parseHeaders(src []byte, h *RequestHeader) (int, error) {
+	return parseHeadersWithLimit(src, h, maxHeaders)
+}
+
+func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, error) {
 	if cap(h.headers) < maxHeaders {
 		h.headers = make([]Header, maxHeaders)
 	}
@@ -375,10 +408,6 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 	pos := 0
 	for {
 		if pos >= len(src) {
-			return 0, ErrMalformedRequest
-		}
-		// RFC 9112 §5.5: reject obsolete line folding
-		if src[pos] == ' ' || src[pos] == '\t' {
 			return 0, ErrMalformedRequest
 		}
 		// blank line = end of headers
@@ -390,73 +419,78 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 			pos++
 			break
 		}
-
-		// find colon
-		colon := bytes.IndexByte(src[pos:], ':')
-		if colon < 0 {
+		// RFC 9112 §5.5: reject obsolete line folding.
+		if src[pos] == ' ' || src[pos] == '\t' {
 			return 0, ErrMalformedRequest
 		}
-		key := src[pos : pos+colon]
-		if len(key) == 0 || !validToken(key) {
-			return 0, ErrMalformedRequest
-		}
-		pos += colon + 1
 
-		// skip optional space
-		for pos < len(src) && (src[pos] == ' ' || src[pos] == '\t') {
+		lineStart := pos
+		colon := -1
+		lineEnd := -1
+		for pos < len(src) {
+			c := src[pos]
+			if c == ':' && colon < 0 {
+				colon = pos
+			}
+			if c == '\r' {
+				if pos+1 >= len(src) || src[pos+1] != '\n' {
+					return 0, ErrMalformedRequest
+				}
+				lineEnd = pos
+				pos += 2
+				break
+			}
+			if c == '\n' {
+				lineEnd = pos
+				pos++
+				break
+			}
 			pos++
 		}
-
-		// find end of value
-		end := bytes.Index(src[pos:], strCRLF)
-		var val []byte
-		if end < 0 {
-			// LF only
-			end = bytes.IndexByte(src[pos:], '\n')
-			if end < 0 {
-				return 0, ErrMalformedRequest
-			}
-			val = trimRight(src[pos : pos+end])
-			pos += end + 1
-		} else {
-			val = trimRight(src[pos : pos+end])
-			pos += end + 2
+		if lineEnd < 0 || colon <= lineStart {
+			return 0, ErrMalformedRequest
 		}
+		key := src[lineStart:colon]
+		if !validToken(key) {
+			return 0, ErrMalformedRequest
+		}
+		valueStart := colon + 1
+		for valueStart < lineEnd && (src[valueStart] == ' ' || src[valueStart] == '\t') {
+			valueStart++
+		}
+		val := trimRight(src[valueStart:lineEnd])
 		for _, c := range val {
 			if (c < 0x20 && c != '\t') || c == 0x7f {
 				return 0, ErrMalformedRequest
 			}
 		}
 
-		// store well-known headers directly
-		switch {
-		case bytesEqualFold(key, HeaderHostBytes):
+		switch knownHeader(key) {
+		case knownHost:
 			if seenHost {
 				return 0, ErrMalformedRequest
 			}
 			seenHost = true
 			h.Host = val
-		case bytesEqualFold(key, HeaderContentTypeBytes):
+		case knownContentType:
 			h.ContentType = val
-		case bytesEqualFold(key, HeaderContentLengthBytes):
+		case knownContentLength:
 			n, ok := parseContentLength(val)
 			if !ok || (h.HasContentLength && n != h.ContentLength) {
 				return 0, ErrMalformedRequest
 			}
 			h.ContentLength, h.HasContentLength = n, true
-		case bytesEqualFold(key, HeaderConnectionBytes):
+		case knownConnection:
 			if hasHeaderToken(val, "close") {
 				h.KeepAlive = false
 			} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
 				h.KeepAlive = true
 			}
-		case bytesEqualFold(key, HeaderTransferEncodingBytes):
+		case knownTransferEncoding:
 			if seenTransferEncoding {
 				return 0, ErrMalformedRequest
 			}
 			seenTransferEncoding = true
-			// RFC 9112 allows stacked transfer codings (e.g. "gzip, chunked")
-			// with "chunked" as the final coding.
 			chunked, ok := parseTransferCoding(val)
 			if !ok {
 				return 0, ErrMalformedRequest
@@ -465,7 +499,7 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 			h.UnsupportedTransferEncoding = !chunked
 		}
 
-		if h.hcount >= maxHeaders {
+		if h.hcount >= maxCount || h.hcount >= maxHeaders {
 			return 0, ErrMalformedRequest
 		}
 		h.headers[h.hcount] = Header{Key: key, Value: val}
@@ -478,6 +512,59 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 		return 0, ErrMalformedRequest
 	}
 	return pos, nil
+}
+
+type knownHeaderKind uint8
+
+const (
+	knownNone knownHeaderKind = iota
+	knownHost
+	knownContentType
+	knownContentLength
+	knownConnection
+	knownTransferEncoding
+)
+
+func knownHeader(k []byte) knownHeaderKind {
+	// Lowercase OR comparisons avoid bytesEqualFold calls against every common
+	// header. Bench requests usually contain Host, Connection, Content-Type and
+	// Content-Length, so this switch removes a lot of branchy byte loops.
+	switch len(k) {
+	case 4:
+		if lower4(k, 'h', 'o', 's', 't') {
+			return knownHost
+		}
+	case 10:
+		if lowerN(k, "connection") {
+			return knownConnection
+		}
+	case 12:
+		if lowerN(k, "content-type") {
+			return knownContentType
+		}
+	case 14:
+		if lowerN(k, "content-length") {
+			return knownContentLength
+		}
+	case 17:
+		if lowerN(k, "transfer-encoding") {
+			return knownTransferEncoding
+		}
+	}
+	return knownNone
+}
+
+func lower4(b []byte, a, c, d, e byte) bool {
+	return (b[0]|0x20) == a && (b[1]|0x20) == c && (b[2]|0x20) == d && (b[3]|0x20) == e
+}
+
+func lowerN(b []byte, s string) bool {
+	for i := 0; i < len(s); i++ {
+		if (b[i] | 0x20) != s[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TrimOWS(b []byte) []byte {

@@ -17,47 +17,42 @@ import (
 var (
 	dateBuf            atomic.Value
 	dateCacheUnix      int64
-	dateMu             sync.Mutex
 	dateValueBuf       atomic.Value
 	dateValueCacheUnix int64
-	dateValueMu        sync.Mutex
 )
 
 // cachedDate returns the full "Date: ...\r\n" header line.
 func cachedDate() []byte {
-	now := time.Now().Unix()
-	if now != atomic.LoadInt64(&dateCacheUnix) {
-		dateMu.Lock()
-		if now != dateCacheUnix {
-			b := make([]byte, 0, 64)
-			b = append(b, "Date: "...)
-			b = time.Now().AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
-			b = append(b, '\r', '\n')
-			dateBuf.Store(b)
-			dateCacheUnix = now
-		}
-		dateMu.Unlock()
-	}
+	// Updated once per second by refreshDateCache. A response hot path must not
+	// call time.Now(): on Linux that is still a measurable vDSO/syscall-sized tax
+	// at 250k-350k RPS. atomic.Value gives readers a lock-free immutable slice.
 	b, _ := dateBuf.Load().([]byte)
 	return b
 }
 
-// cachedDateValue returns just the RFC 1123 date string (no "Date: " prefix),
-// cached and second-granular like cachedDate. Used for HTTP/2 responses.
+// cachedDateValue returns just the RFC 1123 date string (no "Date: " prefix).
+// Used for HTTP/2 responses.
 func cachedDateValue() string {
-	now := time.Now().Unix()
-	if now != atomic.LoadInt64(&dateValueCacheUnix) {
-		dateValueMu.Lock()
-		if now != dateValueCacheUnix {
-			b := make([]byte, 0, 56)
-			b = time.Now().AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
-			dateValueBuf.Store(b)
-			dateValueCacheUnix = now
-		}
-		dateValueMu.Unlock()
-	}
 	b, _ := dateValueBuf.Load().([]byte)
-	return string(b)
+	return b2s(b)
+}
+
+func refreshDateCache() {
+	now := time.Now().UTC()
+	unix := now.Unix()
+	if unix == atomic.LoadInt64(&dateCacheUnix) {
+		return
+	}
+	b := make([]byte, 0, 64)
+	b = append(b, "Date: "...)
+	b = now.AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
+	b = append(b, '\r', '\n')
+	v := make([]byte, 0, 56)
+	v = now.AppendFormat(v, "Mon, 02 Jan 2006 15:04:05 GMT")
+	dateBuf.Store(b)
+	dateValueBuf.Store(v)
+	atomic.StoreInt64(&dateCacheUnix, unix)
+	atomic.StoreInt64(&dateValueCacheUnix, unix)
 }
 
 type Ctx struct {
@@ -102,13 +97,14 @@ type Ctx struct {
 	queryParams []Param
 	qcount      int
 
-	responseCookies []Cookie
-	responseTime    time.Time
-	beforeResponse  []func(*Ctx) error
-	beforeRan       bool
-	multipartForm   *MultipartForm
-	multipartErr    error
-	multipartParsed bool
+	responseCookies     []Cookie
+	responseTime        time.Time
+	beforeResponse      []func(*Ctx) error
+	beforeRan           bool
+	multipartForm       *MultipartForm
+	multipartErr        error
+	multipartParsed     bool
+	captureResponseBody bool
 }
 
 type localEntry struct {
@@ -189,7 +185,13 @@ func (c *Ctx) reset() {
 	c.multipartForm = nil
 	c.multipartErr = nil
 	c.multipartParsed = false
+	c.captureResponseBody = c.server != nil && c.server.cfg.CaptureResponseBody
 }
+
+// CaptureResponseBody enables a stable in-request response body snapshot for
+// middleware that must inspect or persist the final response (cache, idempotency,
+// request journal). It is intentionally opt-in to keep the hot path zero-copy.
+func (c *Ctx) CaptureResponseBody() { c.captureResponseBody = true }
 
 // OnBeforeResponse registers a one-shot hook run immediately before response
 // headers are encoded. It is intended for transactional middleware such as
@@ -287,7 +289,13 @@ func (c *Ctx) Params(name string, defaults ...string) string {
 
 func (c *Ctx) Query(name string, def ...string) string {
 	if !c.queryParsed {
-		c.parseQuery()
+		if v, ok := c.peekQuery(name); ok {
+			return v
+		}
+		if len(def) > 0 {
+			return def[0]
+		}
+		return ""
 	}
 	for i := 0; i < c.qcount; i++ {
 		if c.queryParams[i].Key == name {
@@ -298,6 +306,51 @@ func (c *Ctx) Query(name string, def ...string) string {
 		return def[0]
 	}
 	return ""
+}
+
+func (c *Ctx) peekQuery(name string) (string, bool) {
+	uri := c.Header.URI
+	qi := indexByte(uri, '?')
+	if qi < 0 || qi+1 >= len(uri) {
+		return "", false
+	}
+	qs := uri[qi+1:]
+	for len(qs) > 0 {
+		if qs[0] == '&' {
+			qs = qs[1:]
+			continue
+		}
+		end := indexByte(qs, '&')
+		pair := qs
+		if end >= 0 {
+			pair = qs[:end]
+		}
+		eq := indexByte(pair, '=')
+		key, val := pair, []byte(nil)
+		if eq >= 0 {
+			key, val = pair[:eq], pair[eq+1:]
+		}
+		if rawQueryKeyEqual(key, name) {
+			return urlDecode(val), true
+		}
+		if end < 0 {
+			break
+		}
+		qs = qs[end+1:]
+	}
+	return "", false
+}
+
+func rawQueryKeyEqual(key []byte, name string) bool {
+	if len(key) != len(name) {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if key[i] != name[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Ctx) parseQuery() {
@@ -432,7 +485,7 @@ func (c *Ctx) BodyParser(v any) error {
 		}
 		return codec.Unmarshal(c.body, v)
 	}
-	return json.Unmarshal(c.body, v)
+	return JSONUnmarshal(c.body, v)
 }
 
 // Context carries request cancellation and middleware deadlines.
@@ -699,13 +752,92 @@ func (c *Ctx) SendBytes(b []byte) error {
 
 func (c *Ctx) Send(b []byte) error { return c.SendBytes(b) }
 
+// JSON writes v as application/json using the active JSON engine. Types that
+// implement JSONAppender are encoded directly into the response buffer, avoiding
+// a marshal allocation and a second response-copy on the normal hot path.
 func (c *Ctx) JSON(v any) error {
-	b, err := json.Marshal(v)
+	c.contentType = jsonCT
+	if app, ok := v.(JSONAppender); ok {
+		return c.writeJSONAppender(app)
+	}
+	if c.canFastWrite200() {
+		return c.writeJSONFast(v)
+	}
+	b, err := (jsonCodec{}).Marshal(v)
 	if err != nil {
 		return err
 	}
+	return c.writeResponse(b)
+}
+
+func (c *Ctx) writeJSONFast(v any) error {
+	c.responded = true
+	if c.writeBuf == nil {
+		c.writeBuf = getBytes()
+	}
+
+	jb := jsonEncodeBuf.Get().(*bytes.Buffer)
+	jb.Reset()
+	if err := json.NewEncoder(jb).Encode(v); err != nil {
+		jsonEncodeBuf.Put(jb)
+		return err
+	}
+	body := jb.Bytes()
+	if len(body) > 0 && body[len(body)-1] == '\n' {
+		body = body[:len(body)-1]
+	}
+
+	buf := (*c.writeBuf)[:0]
+	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
+	buf = append(buf, cachedDate()...)
+	buf = append(buf, "Content-Type: application/json\r\nContent-Length: "...)
+	buf = appendInt(buf, len(body))
+	if c.Header.KeepAlive && !c.forceClose {
+		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+	} else {
+		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+	}
+	buf = append(buf, body...)
+	*c.writeBuf = buf
+
+	jb.Reset()
+	jsonEncodeBuf.Put(jb)
+	return writeAll(c.conn, buf)
+}
+
+// JSONBytes sends an already encoded JSON document without re-marshalling.
+func (c *Ctx) JSONBytes(b []byte) error {
 	c.contentType = jsonCT
 	return c.writeResponse(b)
+}
+
+// JSONString sends an already encoded JSON document without re-marshalling.
+func (c *Ctx) JSONString(s string) error {
+	c.contentType = jsonCT
+	return c.writeResponseString(s)
+}
+
+// EchoBody sends the request body back without parsing or copying. This is the
+// correct hot-path primitive for proxy, webhook, and raw echo endpoints; do not
+// decode and re-encode JSON just to return the same payload.
+func (c *Ctx) EchoBody(contentType ...string) error {
+	if len(contentType) > 0 && contentType[0] != "" {
+		c.Type(contentType[0])
+	} else if len(c.Header.ContentType) > 0 {
+		c.contentType = c.Header.ContentType
+	}
+	return c.writeResponse(c.body)
+}
+
+// EchoJSON sends the request body back as JSON. By default it trusts upstream
+// validation for maximum throughput. Pass true to validate with the active JSON
+// engine before echoing.
+func (c *Ctx) EchoJSON(validate ...bool) error {
+	if len(validate) > 0 && validate[0] && !CurrentJSONEngine().Valid(c.body) {
+		return BadRequest("Invalid JSON body")
+	}
+	c.contentType = jsonCT
+	return c.writeResponse(c.body)
 }
 
 func (c *Ctx) Render(name string, data any, layout ...string) error {
@@ -796,7 +928,14 @@ func (c *Ctx) ServerInbox() *Inbox {
 
 // writeResponseString writes a response with a string body — zero alloc.
 func (c *Ctx) writeResponseString(s string) error {
-	c.responseBody = append(c.responseBody[:0], s...)
+	if c.captureResponseBody {
+		c.responseBody = append(c.responseBody[:0], s...)
+	} else {
+		c.responseBody = c.responseBody[:0]
+	}
+	if c.canFastWrite200() {
+		return c.writeFast200String(s)
+	}
 	if c.h2 != nil {
 		return c.h2.writeResponse(c, []byte(s))
 	}
@@ -902,9 +1041,33 @@ func (c *Ctx) writeResponseString(s string) error {
 	return writeAll(c.conn, buf)
 }
 
+func (c *Ctx) writeJSONAppender(app JSONAppender) error {
+	bp := jsonBytePool.Get().(*[]byte)
+	body := (*bp)[:0]
+	out, err := app.AppendJSON(body)
+	if err != nil {
+		*bp = body[:0]
+		jsonBytePool.Put(bp)
+		return err
+	}
+	err = c.writeResponse(out)
+	if cap(out) <= 64<<10 {
+		*bp = out[:0]
+		jsonBytePool.Put(bp)
+	}
+	return err
+}
+
 // writeResponse writes a response with a byte body.
 func (c *Ctx) writeResponse(body []byte) error {
-	c.responseBody = append(c.responseBody[:0], body...)
+	if c.captureResponseBody {
+		c.responseBody = append(c.responseBody[:0], body...)
+	} else {
+		c.responseBody = c.responseBody[:0]
+	}
+	if c.canFastWrite200() {
+		return c.writeFast200Bytes(body)
+	}
 	if c.h2 != nil {
 		return c.h2.writeResponse(c, body)
 	}
@@ -1009,6 +1172,62 @@ func (c *Ctx) writeResponse(body []byte) error {
 	return writeAll(c.conn, buf)
 }
 
+func (c *Ctx) canFastWrite200() bool {
+	return !c.responded && c.status == StatusOK && c.h2 == nil && c.bodyTransform == nil && !c.captureResponseBody &&
+		c.chCount == 0 && len(c.extraHeaders) == 0 && len(c.responseCookies) == 0 && len(c.responseTrailers) == 0 &&
+		len(c.beforeResponse) == 0 && !bytesEqualFold(c.Header.Method, MethodHEADBytes)
+}
+
+func (c *Ctx) writeFast200String(s string) error {
+	c.responded = true
+	if c.writeBuf == nil {
+		c.writeBuf = getBytes()
+	}
+	buf := (*c.writeBuf)[:0]
+	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
+	buf = append(buf, cachedDate()...)
+	if c.contentType != nil {
+		buf = append(buf, "Content-Type: "...)
+		buf = append(buf, c.contentType...)
+		buf = append(buf, '\r', '\n')
+	}
+	buf = append(buf, "Content-Length: "...)
+	buf = appendInt(buf, len(s))
+	if c.Header.KeepAlive && !c.forceClose {
+		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+	} else {
+		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+	}
+	buf = append(buf, s...)
+	*c.writeBuf = buf
+	return writeAll(c.conn, buf)
+}
+
+func (c *Ctx) writeFast200Bytes(body []byte) error {
+	c.responded = true
+	if c.writeBuf == nil {
+		c.writeBuf = getBytes()
+	}
+	buf := (*c.writeBuf)[:0]
+	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
+	buf = append(buf, cachedDate()...)
+	if c.contentType != nil {
+		buf = append(buf, "Content-Type: "...)
+		buf = append(buf, c.contentType...)
+		buf = append(buf, '\r', '\n')
+	}
+	buf = append(buf, "Content-Length: "...)
+	buf = appendInt(buf, len(body))
+	if c.Header.KeepAlive && !c.forceClose {
+		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+	} else {
+		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+	}
+	buf = append(buf, body...)
+	*c.writeBuf = buf
+	return writeAll(c.conn, buf)
+}
+
 func responseBodyAllowed(status int) bool {
 	return status >= 200 && status != 204 && status != 205 && status != 304
 }
@@ -1109,6 +1328,15 @@ func urlDecode(b []byte) string {
 var unhexTable [256]int8
 
 func init() {
+	refreshDateCache()
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for range t.C {
+			refreshDateCache()
+		}
+	}()
+
 	for i := 0; i < 256; i++ {
 		unhexTable[i] = -1
 	}
@@ -1123,4 +1351,7 @@ func init() {
 	}
 }
 
-var jsonCT = []byte("application/json")
+var (
+	jsonCT        = []byte("application/json")
+	jsonEncodeBuf = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+)

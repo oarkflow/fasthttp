@@ -36,6 +36,7 @@ type Router struct {
 	UnsafeParams bool
 
 	trees      map[string]*node
+	static     map[string]map[string]HandlerFunc // method -> exact path -> handler
 	named      map[string]namedRoute
 	routeNames map[string]string
 	routes     map[string]struct{}
@@ -75,6 +76,7 @@ func newRouter() *Router {
 func NewRouter() *Router {
 	return &Router{
 		trees:      make(map[string]*node, 16),
+		static:     make(map[string]map[string]HandlerFunc, 16),
 		named:      make(map[string]namedRoute, 16),
 		routeNames: make(map[string]string, 16),
 		routes:     make(map[string]struct{}, 16),
@@ -242,6 +244,14 @@ func (r *Router) Add(method, path string, h HandlerFunc) {
 
 	segments := splitRouteSegments(path)
 	insertRoute(root, method, path, segments, 0, h, nil)
+	if routeIsStatic(segments) {
+		m := r.static[method]
+		if m == nil {
+			m = make(map[string]HandlerFunc, 16)
+			r.static[method] = m
+		}
+		m[path] = h
+	}
 	r.routes[method+" "+path] = struct{}{}
 }
 
@@ -275,6 +285,24 @@ func (r *Router) findNoLock(method string, path []byte, params *[]Param) Handler
 }
 
 func (r *Router) findNoLockCanonical(method string, path []byte, params *[]Param) HandlerFunc {
+	if m := r.static[method]; m != nil {
+		if h := m[b2s(path)]; h != nil {
+			if params != nil {
+				*params = (*params)[:0]
+			}
+			return h
+		}
+	}
+	if method == "HEAD" {
+		if m := r.static["GET"]; m != nil {
+			if h := m[b2s(path)]; h != nil {
+				if params != nil {
+					*params = (*params)[:0]
+				}
+				return h
+			}
+		}
+	}
 
 	var local []Param
 	if params == nil {
@@ -420,6 +448,15 @@ func (r *Router) methodsNoLock() []string {
 	sort.Strings(methods)
 
 	return methods
+}
+
+func routeIsStatic(segments []string) bool {
+	for _, seg := range segments {
+		if seg == "" || seg[0] == ':' || seg[0] == '*' {
+			return false
+		}
+	}
+	return true
 }
 
 func insertRoute(

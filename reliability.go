@@ -250,6 +250,7 @@ func (r *Reliability) Middleware() HandlerFunc {
 		c.Locals("request_id", requestID)
 
 		if r.journal != nil {
+			c.CaptureResponseBody()
 			meta := RequestJournalEntry{RequestID: requestID, Event: "received", Method: c.Method(), Path: c.Path(), BodyHash: hashBody(c.body), RemoteIP: c.IP(), Time: time.Now().UTC()}
 			_ = r.journal.Append(meta)
 			c.OnBeforeResponse(func(ctx *Ctx) error {
@@ -273,25 +274,26 @@ func (r *Reliability) Middleware() HandlerFunc {
 			if err != nil {
 				return err
 			}
-	switch decision {
-		case idemReplay:
-			c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
-			for k, values := range rec.Headers {
-				for _, v := range values {
-					setReplayHeader(c, k, v)
+			switch decision {
+			case idemReplay:
+				c.Set(HeaderReplayed, r.cfg.IdempotencyReplayHeaderValue)
+				for k, values := range rec.Headers {
+					for _, v := range values {
+						setReplayHeader(c, k, v)
+					}
 				}
+				if len(rec.ContentType) > 0 {
+					c.Type(rec.ContentType)
+				}
+				return c.Status(rec.StatusCode).SendBytes(rec.Response)
+			case idemConflict:
+				return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
+			case idemProcessing:
+				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
 			}
-			if len(rec.ContentType) > 0 {
-				c.Type(rec.ContentType)
-			}
-			return c.Status(rec.StatusCode).SendBytes(rec.Response)
-		case idemConflict:
-			return c.Status(StatusConflict).JSON(Map{"error": "idempotency_key_reused_with_different_payload", "request_id": requestID})
-		case idemProcessing:
-			return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
-		}
-		c.Locals("fh.idem_started", true)
-		c.OnBeforeResponse(func(ctx *Ctx) error {
+			c.Locals("fh.idem_started", true)
+			c.CaptureResponseBody()
+			c.OnBeforeResponse(func(ctx *Ctx) error {
 				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})
 		}
@@ -1143,6 +1145,7 @@ func (r *Reliability) ApplyPolicy(c *Ctx, p ReliabilityPolicy) error {
 			case IdempotencyProcessing:
 				return c.Status(r.cfg.IdempotencyProcessingStatus).JSON(Map{"error": "idempotency_key_processing", "request_id": requestID})
 			}
+			c.CaptureResponseBody()
 			c.OnBeforeResponse(func(ctx *Ctx) error {
 				return r.idem.Complete(key, reqHash, ctx.StatusCode(), string(ctx.contentType), ctx.GetRespHeaders(), ctx.ResponseBody())
 			})

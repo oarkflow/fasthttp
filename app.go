@@ -50,10 +50,21 @@ type Hooks struct {
 
 // Config holds server configuration.
 type Config struct {
-	ReadTimeout          time.Duration
-	WriteTimeout         time.Duration
-	IdleTimeout          time.Duration
-	MaxConnections       int
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
+	IdleTimeout    time.Duration
+	MaxConnections int
+	// FastMode enables hot-path optimizations that match modern high-throughput
+	// frameworks: no per-request deadline syscalls by default, zero-copy route
+	// params valid for the handler lifetime, and no response-body capture unless
+	// middleware explicitly asks for it. It is enabled by default.
+	FastMode bool
+	// SafeParams forces route params to be copied into stable strings. Leave false
+	// for benchmark/server hot paths; turn on only when params are stored after the request.
+	SafeParams bool
+	// CaptureResponseBody keeps a copy of every response for middleware/tests.
+	// It is disabled by default; reliability/cache middleware opt in per request.
+	CaptureResponseBody  bool
 	ReadBufferSize       int
 	MaxRequestBodySize   int
 	MaxHeaderListSize    int
@@ -79,9 +90,11 @@ type Config struct {
 }
 
 var defaultConfig = Config{
-	ReadTimeout:          10 * time.Second,
-	WriteTimeout:         10 * time.Second,
-	IdleTimeout:          60 * time.Second,
+	// Defaults are intentionally tuned for raw throughput. Production deployments
+	// that face untrusted networks should set ReadTimeout/WriteTimeout/IdleTimeout.
+	ReadTimeout:          0,
+	WriteTimeout:         0,
+	IdleTimeout:          0,
 	ReadBufferSize:       16384,
 	MaxRequestBodySize:   4 << 20,
 	MaxHeaderListSize:    64 << 10,
@@ -148,6 +161,9 @@ func New(config ...Config) *App {
 		if c.MaxConnections > 0 {
 			cfg.MaxConnections = c.MaxConnections
 		}
+		cfg.FastMode = c.FastMode
+		cfg.SafeParams = c.SafeParams
+		cfg.CaptureResponseBody = c.CaptureResponseBody
 		if c.MaxRequestBodySize > 0 {
 			cfg.MaxRequestBodySize = c.MaxRequestBodySize
 		}
@@ -214,6 +230,8 @@ func New(config ...Config) *App {
 		app.reliability = reliability
 		app.middleware = append(app.middleware, reliability.Middleware())
 	}
+
+	app.router.UnsafeParams = !cfg.SafeParams
 
 	if cfg.MaxConnections > 0 {
 		app.sem = make(chan struct{}, cfg.MaxConnections)
@@ -579,6 +597,15 @@ func (a *App) runShutdownHooks() {
 	})
 }
 
+func (a *App) setConnActive(conn net.Conn, active bool) {
+	a.connMu.Lock()
+	state := a.conns[conn]
+	a.connMu.Unlock()
+	if state != nil {
+		state.active.Store(active)
+	}
+}
+
 func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 	a.connMu.Lock()
 	if state := a.conns[conn]; state != nil {
@@ -622,7 +649,9 @@ func (a *App) serveConn(conn net.Conn) {
 	state := a.conns[conn]
 	a.connMu.Unlock()
 	if tc, ok := conn.(*tls.Conn); ok && !a.cfg.DisableHTTP2 {
-		_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
+		if a.cfg.ReadTimeout > 0 {
+			_ = tc.SetDeadline(time.Now().Add(a.cfg.ReadTimeout))
+		}
 		if err := tc.Handshake(); err != nil {
 			if !isExpectedConnErr(err) {
 				a.emitError(err)
@@ -650,8 +679,10 @@ func (a *App) serveConn(conn net.Conn) {
 	accumulated := buf[:0]
 
 	for {
-		if err := conn.SetReadDeadline(time.Now().Add(a.cfg.IdleTimeout)); err != nil {
-			return
+		if a.cfg.IdleTimeout > 0 {
+			if err := conn.SetReadDeadline(time.Now().Add(a.cfg.IdleTimeout)); err != nil {
+				return
+			}
 		}
 
 		headEnd := findHeaderEnd(accumulated)
@@ -661,8 +692,10 @@ func (a *App) serveConn(conn net.Conn) {
 				return
 			}
 
-			if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
-				return
+			if a.cfg.ReadTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
+					return
+				}
 			}
 
 			n, err := conn.Read(buf[len(accumulated):cap(buf)])
@@ -805,9 +838,11 @@ func (a *App) serveConn(conn net.Conn) {
 			messageEnd := bodyStart + bodyLen
 			if messageEnd <= cap(buf) {
 				for len(accumulated) < messageEnd {
-					if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
-						releaseCtx(ctx)
-						return
+					if a.cfg.ReadTimeout > 0 {
+						if err := conn.SetReadDeadline(time.Now().Add(a.cfg.ReadTimeout)); err != nil {
+							releaseCtx(ctx)
+							return
+						}
 					}
 					n, err := conn.Read(buf[len(accumulated):cap(buf)])
 					if n > 0 {
@@ -851,9 +886,11 @@ func (a *App) serveConn(conn net.Conn) {
 			ctx.Header.KeepAlive = false
 		}
 
-		if err := conn.SetWriteDeadline(time.Now().Add(a.cfg.WriteTimeout)); err != nil {
-			releaseCtx(ctx)
-			return
+		if a.cfg.WriteTimeout > 0 {
+			if err := conn.SetWriteDeadline(time.Now().Add(a.cfg.WriteTimeout)); err != nil {
+				releaseCtx(ctx)
+				return
+			}
 		}
 
 		a.dispatch(ctx)

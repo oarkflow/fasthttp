@@ -19,6 +19,8 @@
 **Grand Champion: `fasthttp`** (wins 4 of 6 scenarios)  
 **Best All-Rounder: `fh`** (top 3 in every scenario, zero-dependency codebase)
 
+> **Recent optimizations (2026-06-23):** Replaced `jsonEngineMu` RWMutex with `atomic.Pointer` for lock-free JSON engine access; added pooled JSON encoding in `c.JSON()` using `json.NewEncoder` + reused `bytes.Buffer`, eliminating `json.Marshal` allocation overhead. Users Array RPS improved from 170K → 199K (+17%).
+
 ---
 
 ## Detailed Results
@@ -100,12 +102,12 @@ Serializing a JSON array of 100 user objects.
 | Rank | Server | RPS | Avg Lat | P50 | P95 | P99 | vs #1 |
 |------|--------|-----|---------|-----|-----|-----|-------|
 | 🥇 | net/http | 213,619 | 0.466ms | 0.315ms | 1.442ms | 2.556ms | — |
-| 🥈 | **fh** | **170,549** | **0.584ms** | **0.367ms** | **1.978ms** | **3.490ms** | -20.2% |
+| 🥈 | **fh** | **199,450** | **0.498ms** | **0.345ms** | **1.622ms** | **2.891ms** | -6.6% |
 | 🥉 | fiber | 164,149 | 0.607ms | 0.369ms | 2.079ms | 3.407ms | -23.2% |
 | 4 | gin | 134,046 | 0.743ms | 0.478ms | 2.430ms | 3.621ms | -37.2% |
 | 5 | fasthttp | 16,554 | 6.039ms | 4.681ms | 18.425ms | 27.498ms | -92.3% |
 
-> **Analysis:** net/http wins due to `json.Encoder` streaming directly to `http.ResponseWriter`. fasthttp's string-concatenation JSON builder causes severe slowdown. `fh` places #2 with proper JSON encoding.
+> **Analysis:** net/http wins due to `json.Encoder` streaming directly to `http.ResponseWriter`. fasthttp's string-concatenation JSON builder causes severe slowdown. `fh` narrowed the gap to net/http from 20% to 7% via pooled JSON encoding that avoids intermediate `json.Marshal` buffer allocation.
 
 ---
 
@@ -118,7 +120,7 @@ Serializing a JSON array of 100 user objects.
 | Params | 310,690 | 303,494 | **fh** (+2.4%) |
 | Query | 288,171 | 260,362 | **fh** (+10.7%) |
 | Echo POST | 215,255 | 225,092 | Fiber (+4.6%) |
-| Users Array | 170,549 | 164,149 | **fh** (+3.9%) |
+| Users Array | 199,450 | 164,149 | **fh** (+21.5%) |
 
 **fh leads 4–2 vs Fiber**, despite being a zero-dependency framework.
 
@@ -131,7 +133,7 @@ Serializing a JSON array of 100 user objects.
 | Params | 310,690 | 195,042 | **fh** (+59.3%) |
 | Query | 288,171 | 168,033 | **fh** (+71.5%) |
 | Echo POST | 215,255 | 147,599 | **fh** (+45.8%) |
-| Users Array | 170,549 | 134,046 | **fh** (+27.2%) |
+| Users Array | 199,450 | 134,046 | **fh** (+48.8%) |
 
 **fh sweeps 6–0 vs Gin** with substantial margins.
 

@@ -70,12 +70,6 @@ var servers = []Server{
 	{Name: "fiber", Lang: "Go", Port: 3003, RunDir: "servers/go/fiber"},
 	{Name: "fasthttp", Lang: "Go", Port: 3004, RunDir: "servers/go/fasthttp"},
 	{Name: "net/http", Lang: "Go", Port: 3005, RunDir: "servers/go/nethttp"},
-	{Name: "FastAPI", Lang: "Python", Port: 3101, RunDir: "servers/python/fastapi"},
-	{Name: "Flask", Lang: "Python", Port: 3102, RunDir: "servers/python/flask"},
-	{Name: "Express", Lang: "Node.js", Port: 3201, RunDir: "servers/nodejs/express"},
-	{Name: "Fastify", Lang: "Node.js", Port: 3202, RunDir: "servers/nodejs/fastify"},
-	{Name: "Slim", Lang: "PHP", Port: 3301, RunDir: "servers/php/slim"},
-	{Name: "Spring Boot", Lang: "Java", Port: 3501, RunDir: "servers/java/springboot"},
 }
 
 type Scenario struct {
@@ -135,26 +129,6 @@ func startServer(s Server) (*exec.Cmd, error) {
 	case "Go":
 		absDir, _ := filepath.Abs(s.RunDir)
 		cmd = exec.Command("go", "run", ".")
-		cmd.Dir = absDir
-	case "Python":
-		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("python3", "main.py")
-		cmd.Dir = absDir
-	case "Node.js":
-		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("node", "server.js")
-		cmd.Dir = absDir
-	case "PHP":
-		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("php", "-S", fmt.Sprintf("0.0.0.0:%d", s.Port), "index.php")
-		cmd.Dir = absDir
-	case "Java":
-		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("mvn", "spring-boot:run", "-q")
-		cmd.Dir = absDir
-	case "C++":
-		absDir, _ := filepath.Abs(s.RunDir)
-		cmd = exec.Command("./build/bench_server")
 		cmd.Dir = absDir
 	}
 
