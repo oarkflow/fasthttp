@@ -797,3 +797,69 @@ func paramValue(b []byte, unsafeMode bool) string {
 
 	return string(b)
 }
+
+// GetText registers a static 200 OK text/plain endpoint with a prebuilt response
+// for the default high-throughput HTTP/1.1 mode. It falls back to SendString when
+// per-request response features such as Date, keep-alive headers, captures,
+// hooks, or close semantics are enabled.
+func (a *App) GetText(path, body string) *App {
+	return a.Get(path, StaticText(body))
+}
+
+// GetJSONStatic registers a static 200 OK application/json endpoint with a
+// prebuilt response for literal JSON payloads.
+func (a *App) GetJSONStatic(path, body string) *App {
+	return a.Get(path, StaticJSON(body))
+}
+
+// StaticText returns a handler for immutable text/plain responses.
+func StaticText(body string) HandlerFunc {
+	pre := prebuildStatic200(plainTextCT, []byte(body))
+	return func(c *Ctx) error {
+		if c.canStaticPrebuilt() {
+			c.responded = true
+			return writeAll(c.conn, pre)
+		}
+		return c.SendString(body)
+	}
+}
+
+// StaticJSON returns a handler for immutable application/json responses.
+func StaticJSON(body string) HandlerFunc {
+	pre := prebuildStatic200(jsonCT, []byte(body))
+	return func(c *Ctx) error {
+		if c.canStaticPrebuilt() {
+			c.responded = true
+			return writeAll(c.conn, pre)
+		}
+		return c.JSONString(body)
+	}
+}
+
+func prebuildStatic200(contentType, body []byte) []byte {
+	buf := make([]byte, 0, 96+len(contentType)+len(body))
+	buf = append(buf, "HTTP/1.1 200 OK\r\nContent-Type: "...)
+	buf = append(buf, contentType...)
+	buf = append(buf, "\r\nContent-Length: "...)
+	buf = appendInt(buf, len(body))
+	buf = append(buf, "\r\n\r\n"...)
+	buf = append(buf, body...)
+	return buf
+}
+
+func (c *Ctx) canStaticPrebuilt() bool {
+	return c.status == StatusOK &&
+	!c.responded &&
+	c.h2 == nil &&
+	c.bodyTransform == nil &&
+	!c.captureResponseBody &&
+	c.chCount == 0 &&
+	len(c.extraHeaders) == 0 &&
+	len(c.responseCookies) == 0 &&
+	len(c.responseTrailers) == 0 &&
+	len(c.beforeResponse) == 0 &&
+	c.Header.KeepAlive &&
+	!c.forceClose &&
+	!methodIs(c.Header.Method, 'H', 'E', 'A', 'D') &&
+	!c.server.cfg.SendDateHeader && !c.server.cfg.SendKeepAliveHeader
+}

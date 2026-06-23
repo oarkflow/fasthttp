@@ -11,7 +11,7 @@ echo "[setup] Checking dependencies..."
 
 # Go servers
 echo "[setup] Building Go servers..."
-(cd ../servers/go && go mod tidy && go build ./fh ./gin ./fiber ./fasthttp ./nethttp) 2>&1 | tail -2
+(cd servers/go && go mod tidy && go build ./fh ./gin ./fiber ./fasthttp ./nethttp) 2>&1 | tail -2
 
 # Bombardier
 BOMB=$(which bombardier 2>/dev/null || echo "/home/sujit/go/bin/bombardier")

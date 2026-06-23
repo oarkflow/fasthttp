@@ -400,6 +400,10 @@ func parseHeaders(src []byte, h *RequestHeader) (int, error) {
 }
 
 func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, error) {
+	return parseHeadersWithLimitStrict(src, h, maxCount, true)
+}
+
+func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, strictValueValidation bool) (int, error) {
 	if cap(h.headers) < maxHeaders {
 		h.headers = make([]Header, maxHeaders)
 	}
@@ -459,9 +463,11 @@ func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, err
 			valueStart++
 		}
 		val := trimRight(src[valueStart:lineEnd])
-		for _, c := range val {
-			if (c < 0x20 && c != '\t') || c == 0x7f {
-				return 0, ErrMalformedRequest
+		if strictValueValidation {
+			for _, c := range val {
+				if (c < 0x20 && c != '\t') || c == 0x7f {
+					return 0, ErrMalformedRequest
+				}
 			}
 		}
 

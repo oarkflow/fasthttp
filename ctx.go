@@ -3,7 +3,6 @@ package fh
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net"
 	"net/textproto"
@@ -760,49 +759,11 @@ func (c *Ctx) JSON(v any) error {
 	if app, ok := v.(JSONAppender); ok {
 		return c.writeJSONAppender(app)
 	}
-	if c.canFastWrite200() {
-		return c.writeJSONFast(v)
-	}
 	b, err := (jsonCodec{}).Marshal(v)
 	if err != nil {
 		return err
 	}
 	return c.writeResponse(b)
-}
-
-func (c *Ctx) writeJSONFast(v any) error {
-	c.responded = true
-	if c.writeBuf == nil {
-		c.writeBuf = getBytes()
-	}
-
-	jb := jsonEncodeBuf.Get().(*bytes.Buffer)
-	jb.Reset()
-	if err := json.NewEncoder(jb).Encode(v); err != nil {
-		jsonEncodeBuf.Put(jb)
-		return err
-	}
-	body := jb.Bytes()
-	if len(body) > 0 && body[len(body)-1] == '\n' {
-		body = body[:len(body)-1]
-	}
-
-	buf := (*c.writeBuf)[:0]
-	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
-	buf = append(buf, cachedDate()...)
-	buf = append(buf, "Content-Type: application/json\r\nContent-Length: "...)
-	buf = appendInt(buf, len(body))
-	if c.Header.KeepAlive && !c.forceClose {
-		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
-	} else {
-		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
-	}
-	buf = append(buf, body...)
-	*c.writeBuf = buf
-
-	jb.Reset()
-	jsonEncodeBuf.Put(jb)
-	return writeAll(c.conn, buf)
 }
 
 // JSONBytes sends an already encoded JSON document without re-marshalling.
@@ -815,6 +776,16 @@ func (c *Ctx) JSONBytes(b []byte) error {
 func (c *Ctx) JSONString(s string) error {
 	c.contentType = jsonCT
 	return c.writeResponseString(s)
+}
+
+// JSONAppend writes JSON generated directly into fh's pooled response buffer.
+// This is the preferred hot-path API for small dynamic JSON responses because it
+// avoids string concatenation, reflection, and a second body copy.
+func (c *Ctx) JSONAppend(fn JSONAppendFunc) error {
+	if fn == nil {
+		return c.JSONBytes([]byte("null"))
+	}
+	return c.writeJSONAppender(fn)
 }
 
 // EchoBody sends the request body back without parsing or copying. This is the
@@ -957,8 +928,9 @@ func (c *Ctx) writeResponseString(s string) error {
 	// Status line
 	buf = appendStatusLine(buf, c.status)
 
-	// Date (RFC 9110 §8.6)
-	buf = append(buf, cachedDate()...)
+	if c.server.cfg.SendDateHeader {
+		buf = append(buf, cachedDate()...)
+	}
 
 	// Content-Type
 	if c.contentType != nil {
@@ -1004,9 +976,10 @@ func (c *Ctx) writeResponseString(s string) error {
 		buf = append(buf, '\r', '\n')
 	}
 
-	// Connection
 	if c.Header.KeepAlive && !c.forceClose {
-		buf = append(buf, "Connection: keep-alive\r\n"...)
+		if c.server.cfg.SendKeepAliveHeader {
+			buf = append(buf, "Connection: keep-alive\r\n"...)
+		}
 	} else {
 		buf = append(buf, "Connection: close\r\n"...)
 	}
@@ -1014,7 +987,7 @@ func (c *Ctx) writeResponseString(s string) error {
 	buf = append(buf, '\r', '\n')
 
 	// Body
-	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
+	if bodyAllowed && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D') {
 		if hasTrailers {
 			// Write body as a single chunk
 			if len(s) > 0 {
@@ -1092,8 +1065,9 @@ func (c *Ctx) writeResponse(body []byte) error {
 
 	buf = appendStatusLine(buf, c.status)
 
-	// Date (RFC 9110 §8.6)
-	buf = append(buf, cachedDate()...)
+	if c.server.cfg.SendDateHeader {
+		buf = append(buf, cachedDate()...)
+	}
 
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
@@ -1137,9 +1111,10 @@ func (c *Ctx) writeResponse(body []byte) error {
 		buf = append(buf, '\r', '\n')
 	}
 
-	// Connection
 	if c.Header.KeepAlive && !c.forceClose {
-		buf = append(buf, "Connection: keep-alive\r\n"...)
+		if c.server.cfg.SendKeepAliveHeader {
+			buf = append(buf, "Connection: keep-alive\r\n"...)
+		}
 	} else {
 		buf = append(buf, "Connection: close\r\n"...)
 	}
@@ -1147,7 +1122,7 @@ func (c *Ctx) writeResponse(body []byte) error {
 	buf = append(buf, '\r', '\n')
 
 	// RFC 9110: a HEAD response has the same headers as GET but no content.
-	if bodyAllowed && !bytesEqualFold(c.Header.Method, MethodHEADBytes) {
+	if bodyAllowed && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D') {
 		if hasTrailers {
 			if len(body) > 0 {
 				buf = appendHex(buf, len(body))
@@ -1175,7 +1150,7 @@ func (c *Ctx) writeResponse(body []byte) error {
 func (c *Ctx) canFastWrite200() bool {
 	return !c.responded && c.status == StatusOK && c.h2 == nil && c.bodyTransform == nil && !c.captureResponseBody &&
 		c.chCount == 0 && len(c.extraHeaders) == 0 && len(c.responseCookies) == 0 && len(c.responseTrailers) == 0 &&
-		len(c.beforeResponse) == 0 && !bytesEqualFold(c.Header.Method, MethodHEADBytes)
+		len(c.beforeResponse) == 0 && !methodIs(c.Header.Method, 'H', 'E', 'A', 'D')
 }
 
 func (c *Ctx) writeFast200String(s string) error {
@@ -1185,7 +1160,9 @@ func (c *Ctx) writeFast200String(s string) error {
 	}
 	buf := (*c.writeBuf)[:0]
 	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
-	buf = append(buf, cachedDate()...)
+	if c.server.cfg.SendDateHeader {
+		buf = append(buf, cachedDate()...)
+	}
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
 		buf = append(buf, c.contentType...)
@@ -1194,7 +1171,11 @@ func (c *Ctx) writeFast200String(s string) error {
 	buf = append(buf, "Content-Length: "...)
 	buf = appendInt(buf, len(s))
 	if c.Header.KeepAlive && !c.forceClose {
-		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+		if c.server.cfg.SendKeepAliveHeader {
+			buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+		} else {
+			buf = append(buf, "\r\n\r\n"...)
+		}
 	} else {
 		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
 	}
@@ -1210,7 +1191,9 @@ func (c *Ctx) writeFast200Bytes(body []byte) error {
 	}
 	buf := (*c.writeBuf)[:0]
 	buf = append(buf, "HTTP/1.1 200 OK\r\n"...)
-	buf = append(buf, cachedDate()...)
+	if c.server.cfg.SendDateHeader {
+		buf = append(buf, cachedDate()...)
+	}
 	if c.contentType != nil {
 		buf = append(buf, "Content-Type: "...)
 		buf = append(buf, c.contentType...)
@@ -1219,9 +1202,17 @@ func (c *Ctx) writeFast200Bytes(body []byte) error {
 	buf = append(buf, "Content-Length: "...)
 	buf = appendInt(buf, len(body))
 	if c.Header.KeepAlive && !c.forceClose {
-		buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+		if c.server.cfg.SendKeepAliveHeader {
+			buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+		} else {
+			buf = append(buf, "\r\n\r\n"...)
+		}
 	} else {
 		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+	}
+	if len(body) >= writevBodyThreshold {
+		*c.writeBuf = buf
+		return writeBuffers(c.conn, buf, body)
 	}
 	buf = append(buf, body...)
 	*c.writeBuf = buf
@@ -1230,6 +1221,16 @@ func (c *Ctx) writeFast200Bytes(body []byte) error {
 
 func responseBodyAllowed(status int) bool {
 	return status >= 200 && status != 204 && status != 205 && status != 304
+}
+
+const writevBodyThreshold = 512
+
+func writeBuffers(conn net.Conn, bufs ...[]byte) error {
+	// net.Buffers uses writev on Unix for TCP connections, avoiding a body copy
+	// into the response header buffer for echo/proxy/large JSON responses.
+	var nb net.Buffers = bufs
+	_, err := nb.WriteTo(conn)
+	return err
 }
 
 func writeAll(conn net.Conn, b []byte) error {
@@ -1351,7 +1352,4 @@ func init() {
 	}
 }
 
-var (
-	jsonCT        = []byte("application/json")
-	jsonEncodeBuf = sync.Pool{New: func() any { return new(bytes.Buffer) }}
-)
+var jsonCT = []byte("application/json")

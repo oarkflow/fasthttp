@@ -377,6 +377,13 @@ type JSONAppender interface {
 	AppendJSON(dst []byte) ([]byte, error)
 }
 
+// JSONAppendFunc adapts a function to JSONAppender. It lets hot handlers build
+// dynamic JSON directly into fh's pooled response buffer without string
+// concatenation or encoding/json reflection.
+type JSONAppendFunc func([]byte) ([]byte, error)
+
+func (f JSONAppendFunc) AppendJSON(dst []byte) ([]byte, error) { return f(dst) }
+
 // JSONEncoder is the small encoder surface required by the codec registry. It is
 // intentionally compatible with encoding/json.Encoder and with engines such as
 // sonic, go-json, jsoniter, or your own fastjson adapter.

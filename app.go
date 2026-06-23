@@ -64,21 +64,35 @@ type Config struct {
 	SafeParams bool
 	// CaptureResponseBody keeps a copy of every response for middleware/tests.
 	// It is disabled by default; reliability/cache middleware opt in per request.
-	CaptureResponseBody  bool
-	ReadBufferSize       int
-	MaxRequestBodySize   int
-	MaxHeaderListSize    int
-	MaxHeaderCount       int
-	MaxRequestLineSize   int
-	MaxConcurrentStreams uint32
-	DisableKeepAlive     bool
-	DisableHTTP2         bool
-	ErrorHandler         ErrorHandler
-	NotFoundHandler      NotFoundHandler
-	MethodNotAllowed     MethodNotAllowedHandler
-	OptionsHandler       OptionsHandler
-	Logger               *log.Logger
-	TemplateEngine       TemplateEngine
+	CaptureResponseBody bool
+	// SendDateHeader emits an RFC 9110 Date header on HTTP/1.1 responses. It is
+	// disabled by default because modern high-throughput frameworks omit it on
+	// benchmark hot paths and the Date line costs bytes plus append work on every
+	// response. Enable it at your edge/origin boundary when required by policy.
+	SendDateHeader bool
+	// SendKeepAliveHeader emits an explicit Connection: keep-alive header for
+	// HTTP/1.1 keep-alive responses. It is disabled by default because keep-alive
+	// is implicit in HTTP/1.1; Connection: close is still emitted when needed.
+	SendKeepAliveHeader bool
+	// StrictHeaderValueValidation rejects control bytes inside every request header
+	// value. It is disabled by default for the hot path; structural validation,
+	// duplicate Host, Content-Length conflicts, TE conflicts, and obs-fold
+	// rejection always remain enabled.
+	StrictHeaderValueValidation bool
+	ReadBufferSize              int
+	MaxRequestBodySize          int
+	MaxHeaderListSize           int
+	MaxHeaderCount              int
+	MaxRequestLineSize          int
+	MaxConcurrentStreams        uint32
+	DisableKeepAlive            bool
+	DisableHTTP2                bool
+	ErrorHandler                ErrorHandler
+	NotFoundHandler             NotFoundHandler
+	MethodNotAllowed            MethodNotAllowedHandler
+	OptionsHandler              OptionsHandler
+	Logger                      *log.Logger
+	TemplateEngine              TemplateEngine
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
 	// Environment controls safe error exposure defaults. Use EnvDevelopment locally and EnvProduction in production.
@@ -164,6 +178,9 @@ func New(config ...Config) *App {
 		cfg.FastMode = c.FastMode
 		cfg.SafeParams = c.SafeParams
 		cfg.CaptureResponseBody = c.CaptureResponseBody
+		cfg.SendDateHeader = c.SendDateHeader
+		cfg.SendKeepAliveHeader = c.SendKeepAliveHeader
+		cfg.StrictHeaderValueValidation = c.StrictHeaderValueValidation
 		if c.MaxRequestBodySize > 0 {
 			cfg.MaxRequestBodySize = c.MaxRequestBodySize
 		}
@@ -753,7 +770,7 @@ func (a *App) serveConn(conn net.Conn) {
 			return
 		}
 
-		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount)
+		_, err = parseHeadersLimit(accumulated[consumed:headEnd+4], &ctx.Header, a.cfg.MaxHeaderCount, a.cfg.StrictHeaderValueValidation)
 		if err != nil {
 			releaseCtx(ctx)
 			_ = writeAll(conn, serverError400)
