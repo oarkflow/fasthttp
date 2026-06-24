@@ -189,6 +189,7 @@ func main() {
 			"service": "tcpguard fh anomaly-detection demo",
 			"try": []string{
 				"GET /public",
+				"GET /_demo/features for a catalog of runnable feature walkthroughs",
 				"GET /public?debug=true",
 				"POST /_demo/auth/fail repeatedly with X-Forwarded-For and different X-User-ID values",
 				"POST /api/v1/account/login with X-New-Device: true, X-Previous-Country: US, X-Country: NP",
@@ -199,6 +200,25 @@ func main() {
 				"POST /api/v1/transfers using signature from /_demo/sign",
 				"External risk datasource is served separately at http://127.0.0.1:18186/risk-source",
 				"PUT /api/users/user-2/order/order-9 with X-User-ID: user-1",
+			},
+		})
+	})
+
+	app.Get("/_demo/features", func(c *fh.Ctx) error {
+		return c.JSON(map[string]any{
+			"complete": "features/complete/README.md",
+			"features": []string{
+				"features/public/README.md",
+				"features/auth/README.md",
+				"features/account/README.md",
+				"features/admin/README.md",
+				"features/reports/README.md",
+				"features/functions/README.md",
+				"features/payments/README.md",
+				"features/transfers/README.md",
+				"features/dynamic/README.md",
+				"features/observability/README.md",
+				"features/management/README.md",
 			},
 		})
 	})
@@ -300,7 +320,7 @@ func main() {
 	}()
 
 	fmt.Printf("TCPGuard fh demo listening on http://127.0.0.1%s\n", appAddr)
-	fmt.Println("Open examples/tcpguard-fh-server/README.md for curl scenarios.")
+	fmt.Println("Open examples/server/README.md for curl scenarios.")
 	log.Fatal(app.Listen(appAddr))
 }
 
@@ -480,19 +500,6 @@ func sign(method, path string, body []byte) string {
 	_, _ = mac.Write([]byte("\n"))
 	_, _ = mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func httpStatus(effect tcpguard.DecisionEffect) int {
-	switch effect {
-	case tcpguard.DecisionBlock, tcpguard.DecisionDeny, tcpguard.DecisionRevoke:
-		return http.StatusForbidden
-	case tcpguard.DecisionThrottle:
-		return http.StatusTooManyRequests
-	case tcpguard.DecisionChallenge:
-		return http.StatusUnauthorized
-	default:
-		return http.StatusOK
-	}
 }
 
 func errorBody(err error) map[string]any { return map[string]any{"error": err.Error()} }

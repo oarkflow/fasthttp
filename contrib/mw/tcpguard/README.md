@@ -87,4 +87,4 @@ If TCPGuard enforces the decision, the middleware writes the upstream TCPGuard r
 
 ## Complete example
 
-See `examples/tcpguard-fh-server` for a complete demo using `github.com/oarkflow/tcpguard v0.0.14`, BCL policy files, datasource lookups, HMAC signing, auth events, incidents, approvals, audit verification, management APIs, and endpoint-specific behavior.
+See `examples/server` for a complete demo using `github.com/oarkflow/tcpguard v0.0.14`, BCL policy files, datasource lookups, HMAC signing, auth events, incidents, approvals, audit verification, management APIs, and endpoint-specific behavior.

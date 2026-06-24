@@ -5,7 +5,7 @@ This is a complete `github.com/oarkflow/fh` server wired to TCPGuard as an enter
 ## Run
 
 ```bash
-cd examples/tcpguard-fh-server
+cd examples/server
 go mod tidy
 go run .
 ```
@@ -111,6 +111,15 @@ The server loads `tcpguard.bcl`, which includes rule files under `rules/*/*.bcl`
 | Security controls | HMAC signatures, nonce/timestamp replay checks, authz policy file, MFA/challenge/block/throttle actions |
 | Enterprise operations | audit envelopes and verification, incidents, approval records, metrics snapshot, hot reload/simulate/explain management APIs |
 
+## Feature walkthroughs
+
+The complete runnable walkthrough is in `features/complete/README.md`. It ties the feature-specific examples together into one flow: clean allow, datasource and intel-backed denials, behavioral challenge, business-rule block, signed transfer allow/replay protection, audit verification, incidents, metrics, and management API checks.
+
+Feature-specific examples are available under `features/*/README.md`, and the running server exposes the same catalog at:
+
+```bash
+curl -s http://127.0.0.1:18184/_demo/features
+```
 
 ## Route-level middleware design
 
@@ -134,7 +143,7 @@ This keeps each endpoint in control of its own middleware chain. Operational dem
 Start the server in one terminal, then run the smoke verifier in another terminal:
 
 ```bash
-cd examples/tcpguard-fh-server
+cd examples/server
 ./scripts/verify_examples.sh
 ```
 
@@ -572,9 +581,9 @@ Response description: the management API explains why a synthetic request would 
 Validate and lint the policy from the repository root:
 
 ```bash
-go run ./cmd/tcpguard validate -dir ./examples/tcpguard-fh-server
-go run ./cmd/tcpguard lint -dir ./examples/tcpguard-fh-server
-go run ./cmd/tcpguard lint -strict -dir ./examples/tcpguard-fh-server
+go run ./cmd/tcpguard validate -dir ./examples/server
+go run ./cmd/tcpguard lint -dir ./examples/server
+go run ./cmd/tcpguard lint -strict -dir ./examples/server
 ```
 
 Expected response: JSON with policy validity and linter issues. Strict mode exits non-zero when warnings exist.

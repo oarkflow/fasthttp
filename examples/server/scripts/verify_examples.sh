@@ -53,6 +53,7 @@ if [[ "$VERIFY_DETAILS" == "true" ]]; then
 fi
 
 check_decision "clean public" 200 allow "" "$BASE_URL/public"
+check_status "feature catalog" 200 "$BASE_URL/_demo/features"
 check_decision "debug query throttled" 429 throttle "debug-query-probe" "$BASE_URL/public?debug=true"
 check_decision "banned user blocked" 403 block "cache-banned-user" -H 'X-User-ID: banned-user' "$BASE_URL/public"
 check_decision "tenant lockdown blocked" 403 block "tenant-lockdown" -H 'X-Tenant-ID: locked-tenant' "$BASE_URL/public"
