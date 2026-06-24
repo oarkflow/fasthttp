@@ -137,7 +137,7 @@ func (h *RequestHeader) Init() {
 	h.reset()
 }
 
-func (h *RequestHeader) SetCookie(c *Ctx, name, value string) {
+func (h *RequestHeader) SetCookie(c *DefaultCtx, name, value string) {
 	c.Header.headers[0] = Header{Key: []byte("Cookie"), Value: []byte(name + "=" + value)}
 	c.Header.hcount = 1
 }
@@ -575,13 +575,12 @@ func knownHeader(k []byte) knownHeaderKind {
 		if lowerN(k, "content-length") {
 			return knownContentLength
 		}
+		if lowerN(k, "http2-settings") {
+			return knownHTTP2Settings
+		}
 	case 17:
 		if lowerN(k, "transfer-encoding") {
 			return knownTransferEncoding
-		}
-	case 18:
-		if lowerN(k, "http2-settings") {
-			return knownHTTP2Settings
 		}
 	}
 	return knownNone

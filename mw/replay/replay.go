@@ -37,8 +37,8 @@ type Config struct {
 	Header string
 	TTL    time.Duration
 	Store  Store
-	Key    func(*fh.Ctx) string
-	Next   func(*fh.Ctx) bool
+	Key    func(fh.Ctx) string
+	Next   func(fh.Ctx) bool
 }
 
 func New(config Config) fh.HandlerFunc {
@@ -51,7 +51,7 @@ func New(config Config) fh.HandlerFunc {
 	if config.Store == nil {
 		config.Store = NewMemoryStore()
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
 			return c.Next()
 		}

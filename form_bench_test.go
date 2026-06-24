@@ -81,10 +81,10 @@ func BenchmarkDecodeFormNested(b *testing.B) {
 }
 
 func BenchmarkParseQuery(b *testing.B) {
-	c := &Ctx{
+	c := &DefaultCtx{
 		queryParams: make([]Param, 0, 16),
 	}
-	c.Header.URI = []byte("/path?name=John&age=30&city=New+York&country=US&active=true")
+	c.RequestHeader().URI = []byte("/path?name=John&age=30&city=New+York&country=US&active=true")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

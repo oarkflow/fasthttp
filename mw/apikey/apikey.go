@@ -6,15 +6,15 @@ import (
 	"github.com/oarkflow/fh"
 )
 
-type LookupFunc func(ctx *fh.Ctx, key string) bool
-type ErrorHandler func(ctx *fh.Ctx) error
+type LookupFunc func(ctx fh.Ctx, key string) bool
+type ErrorHandler func(ctx fh.Ctx) error
 
 type Config struct {
 	Header string
 	Query  string
 	Keys   []string
 	Lookup LookupFunc
-	Next   func(*fh.Ctx) bool
+	Next   func(fh.Ctx) bool
 	Error  ErrorHandler
 }
 
@@ -29,11 +29,11 @@ func New(config Config) fh.HandlerFunc {
 		}
 	}
 	if config.Error == nil {
-		config.Error = func(c *fh.Ctx) error {
+		config.Error = func(c fh.Ctx) error {
 			return fh.NewHTTPError(fh.StatusUnauthorized, "API_KEY_INVALID", "API key is missing or invalid")
 		}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		if config.Next != nil && config.Next(c) {
 			return c.Next()
 		}

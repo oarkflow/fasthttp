@@ -19,7 +19,7 @@ type Config struct {
 	AddPrefix    string
 	Timeout      time.Duration
 	Director     func(*http.Request)
-	ErrorHandler func(*fh.Ctx, error) error
+	ErrorHandler func(fh.Ctx, error) error
 }
 
 func New(cfg Config) fh.HandlerFunc {
@@ -47,7 +47,7 @@ func New(cfg Config) fh.HandlerFunc {
 			cfg.Director(r)
 		}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		req, err := request(c, target)
 		if err != nil {
 			return err
@@ -65,7 +65,7 @@ func New(cfg Config) fh.HandlerFunc {
 }
 
 func Gateway(routes map[string]Config) fh.HandlerFunc {
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		var best string
 		var cfg Config
 		for prefix, candidate := range routes {
@@ -83,7 +83,7 @@ func Gateway(routes map[string]Config) fh.HandlerFunc {
 	}
 }
 
-func request(c *fh.Ctx, target *url.URL) (*http.Request, error) {
+func request(c fh.Ctx, target *url.URL) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(c.Context(), c.Method(), target.String()+c.OriginalURL(), io.NopCloser(bytes.NewReader(c.Body())))
 	if err != nil {
 		return nil, err
@@ -98,7 +98,7 @@ func request(c *fh.Ctx, target *url.URL) (*http.Request, error) {
 }
 
 type responseWriter struct {
-	ctx         *fh.Ctx
+	ctx         fh.Ctx
 	header      http.Header
 	status      int
 	err         error

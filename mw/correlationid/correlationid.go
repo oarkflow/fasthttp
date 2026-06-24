@@ -31,7 +31,7 @@ func New(config ...Config) fh.HandlerFunc {
 			cfg.Validator = o.Validator
 		}
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		id := ""
 		if cfg.TrustIncoming {
 			id = c.Get(cfg.Header)

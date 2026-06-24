@@ -40,15 +40,15 @@ func main() {
 		fh.WithDisableHTTP2(true), // HTTP/1 benchmark mode; enable HTTP/2 for h2/h2c deployments.
 	)
 
-	app.Get("/plaintext", func(c *fh.Ctx) error {
+	app.Get("/plaintext", func(c fh.Ctx) error {
 		return c.SendString("Hello, World!")
 	})
 
-	app.Get("/json", func(c *fh.Ctx) error {
+	app.Get("/json", func(c fh.Ctx) error {
 		return c.JSONString(`{"message":"Hello, World!"}`)
 	})
 
-	app.Get("/users/:id", func(c *fh.Ctx) error {
+	app.Get("/users/:id", func(c fh.Ctx) error {
 		id := c.Params("id")
 		return c.JSONAppend(func(dst []byte) ([]byte, error) {
 			dst = append(dst, `{"id":0,"name":"User `...)
@@ -58,7 +58,7 @@ func main() {
 		})
 	})
 
-	app.Get("/search", func(c *fh.Ctx) error {
+	app.Get("/search", func(c fh.Ctx) error {
 		q := c.Query("q")
 		return c.JSONAppend(func(dst []byte) ([]byte, error) {
 			dst = append(dst, `{"query":"`...)
@@ -68,11 +68,11 @@ func main() {
 		})
 	})
 
-	app.Post("/echo", func(c *fh.Ctx) error {
+	app.Post("/echo", func(c fh.Ctx) error {
 		return c.EchoJSON()
 	})
 
-	app.Get("/users", func(c *fh.Ctx) error {
+	app.Get("/users", func(c fh.Ctx) error {
 		return c.JSONBytes(usersJSON)
 	})
 

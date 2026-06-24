@@ -17,7 +17,7 @@ func New(cfg Config) fh.HandlerFunc {
 	if cfg.Header == "" {
 		cfg.Header = "Accept-Version"
 	}
-	return func(c *fh.Ctx) error {
+	return func(c fh.Ctx) error {
 		v := c.Get(cfg.Header)
 		if v == "" {
 			v = cfg.Default
