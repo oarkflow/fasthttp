@@ -21,5 +21,5 @@ curl -i -X PUT \
 A mismatched user/order owner should receive a challenge or deny response. A matching owner can proceed to:
 
 ```json
-{"ok":true,"message":"user/order update accepted","risk":""}
+{"ok":true,"message":"user/order update accepted"}
 ```

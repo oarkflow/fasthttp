@@ -35,7 +35,7 @@ curl -i -X POST \
 Valid signed request:
 
 ```json
-{"ok":true,"message":"signed transfer accepted","risk":""}
+{"ok":true,"message":"signed transfer accepted"}
 ```
 
 Reusing the same nonce or changing the body after signing should be blocked.

@@ -98,8 +98,8 @@ rule "dynamic-order-change" {
 
   when {
     all {
-      request.path matches "/api/users/:id/order/:order_id"
       request.method in ["PUT", "PATCH", "DELETE"]
+      request.params.id not_equals ""
       user.id not_equals request.params.id
     }
   }

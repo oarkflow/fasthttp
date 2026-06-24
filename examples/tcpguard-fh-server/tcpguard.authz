@@ -37,6 +37,11 @@ tenant locked-bank {
   parent root
 }
 
+tenant locked-tenant {
+  name "Locked TCPGuard Demo Tenant"
+  parent root
+}
+
 tenant demo {
   name "TCPGuard Demo Tenant"
   parent root
@@ -166,6 +171,20 @@ policy locked-demo-public-routes {
   priority 100
 }
 
+policy locked-tenant-public-routes {
+  tenant locked-tenant
+  effect allow
+  actions [GET]
+  resources [
+    route:GET:/public
+    route:GET:/geo-restricted
+  ]
+  when {
+    subject.type == "user"
+  }
+  priority 100
+}
+
 policy demo-login-routes {
   tenant demo
   effect allow
@@ -199,6 +218,7 @@ policy demo-bank-authenticated-routes {
     subject.roles contains any [
       member
       manager
+      finance_approver
       admin
       super_admin
     ]
@@ -217,6 +237,7 @@ policy demo-bank-manager-routes {
   when {
     subject.roles contains any [
       manager
+      finance_approver
       admin
       super_admin
     ]

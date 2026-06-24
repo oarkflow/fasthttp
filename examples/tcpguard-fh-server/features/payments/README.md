@@ -24,5 +24,5 @@ curl -i -X POST \
 High-risk approvals can create incidents or approvals and return a challenge/block response. Clean allowed response:
 
 ```json
-{"ok":true,"message":"payment approved","risk":""}
+{"ok":true,"message":"payment approved"}
 ```

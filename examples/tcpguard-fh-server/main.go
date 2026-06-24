@@ -33,6 +33,8 @@ const hmacSecret = "tcpguard-demo-secret"
 func exampleResponsePolicy() tcpguard.ResponseMessagePolicy {
 	env := tcpguard.ParseResponseEnvironment(os.Getenv("TCPGUARD_ENV"))
 	if env == "" {
+		// Keep the example production-like by default. Set
+		// TCPGUARD_ENV=development only when you need full local diagnostics.
 		env = tcpguard.EnvironmentProduction
 	}
 	policy := tcpguard.DefaultResponseMessagePolicy(env)
@@ -68,11 +70,15 @@ func exampleLogPolicy() tcpguard.ResponseMessagePolicy {
 	// references, and safe entity references. Use TCPGUARD_ENV=development for full redacted traces.
 	if policy.Environment == tcpguard.EnvironmentProduction {
 		policy.LogLevel = tcpguard.DecisionLogCompact
+		policy.IncludeActions = false
+		policy.IncludeEvidence = false
+		policy.IncludeDescription = false
+		policy.MaxDetails = 3
 	} else {
 		policy.LogLevel = tcpguard.DecisionLogFull
+		policy.IncludeRuleIDs = true
+		policy.IncludeFindingMessages = true
 	}
-	policy.IncludeRuleIDs = true
-	policy.IncludeFindingMessages = true
 	return policy
 }
 
@@ -88,7 +94,25 @@ func logDecision(event string, sec *tcpguard.Context, decision tcpguard.Decision
 }
 
 func logHTTPDecision(c *fh.Ctx, result tcpguard.HTTPRequestResult) {
+	if !shouldLogHTTPDecision(result) {
+		return
+	}
 	logDecision("tcpguard.http.decision", result.Context, result.Decision)
+}
+
+func shouldLogHTTPDecision(result tcpguard.HTTPRequestResult) bool {
+	if strings.EqualFold(os.Getenv("TCPGUARD_LOG_ALLOWED"), "true") {
+		return true
+	}
+	if result.Enforced {
+		return true
+	}
+	switch strings.ToLower(string(result.Decision.Severity)) {
+	case "", "info":
+		return false
+	default:
+		return true
+	}
 }
 
 func respondWithDecision(c *fh.Ctx, sec *tcpguard.Context, decision tcpguard.Decision) error {
@@ -103,6 +127,11 @@ func respondWithDecision(c *fh.Ctx, sec *tcpguard.Context, decision tcpguard.Dec
 func main() {
 	ctx := context.Background()
 	dir := exampleDir()
+	// TCPGuard v0.0.14 loads datasource and intel-feed paths relative to
+	// the process working directory. Pin the demo to its own directory so all
+	// README curl scenarios work whether the user runs `go run .` from this
+	// folder, from the repository root, or through an IDE/debugger.
+	must("enter tcpguard example directory", os.Chdir(dir))
 	policyFile := filepath.Join(dir, "tcpguard.bcl")
 
 	bundle, err := bcl.LoadTCPGuardBundleFile(ctx, policyFile)
@@ -226,6 +255,7 @@ func main() {
 	guardMiddleware := tcpguardfh.MiddlewareWithConfig(tcpguardfh.Config{
 		Guard:          guard,
 		ResponsePolicy: exampleResponsePolicy(),
+		HeaderMode:     tcpguardfh.HeaderModeCompact,
 		OnDecision:     logHTTPDecision,
 	})
 
@@ -291,7 +321,7 @@ func riskSourceHandler(w http.ResponseWriter, r *http.Request) {
 
 func ok(message string) fh.HandlerFunc {
 	return func(c *fh.Ctx) error {
-		return c.JSON(map[string]any{"ok": true, "message": message, "risk": c.Get("X-TCPGuard-Risk")})
+		return c.JSON(map[string]any{"ok": true, "message": message})
 	}
 }
 
@@ -324,7 +354,8 @@ func managementConfig() tcpguard.ManagementServerConfig {
 
 func extractIdentity(r *http.Request, sec *tcpguard.Context) {
 	sec.Identity.ID = firstNonEmpty(r.Header.Get("X-User-ID"), "anonymous")
-	sec.Identity.Role = firstNonEmpty(r.Header.Get("X-User-Role"), "member")
+	sec.Identity.Role = firstNonEmpty(r.Header.Get("X-User-Role"), defaultRoleForUser(sec.Identity.ID))
+	sec.Identity.Roles = []string{sec.Identity.Role}
 	sec.Identity.Tenant = firstNonEmpty(r.Header.Get("X-Tenant-ID"), "demo-bank")
 	sec.Tenant.ID = sec.Identity.Tenant
 	sec.Session.ID = firstNonEmpty(r.Header.Get("X-Session-ID"), "session-"+sec.Identity.ID)
@@ -335,13 +366,29 @@ func extractIdentity(r *http.Request, sec *tcpguard.Context) {
 	sec.Device.ID = sec.Session.DeviceID
 	sec.Device.New = sec.Session.NewDevice
 	if country := r.Header.Get("X-Country"); country != "" {
+		// The demo accepts X-Country as an explicit test fixture so the geo
+		// restriction scenario is deterministic without requiring a local GeoIP DB
+		// match for documentation-reserved IP ranges.
+		sec.Network.GeoFound = true
 		sec.Network.Country = country
 		sec.Network.CountryCode = country
 	}
 	sec.Network.ASN = r.Header.Get("X-ASN")
 }
 
+func defaultRoleForUser(userID string) string {
+	switch userID {
+	case "admin-1":
+		return "admin"
+	case "manager-1", "analyst-1":
+		return "manager"
+	default:
+		return "member"
+	}
+}
+
 func extractBusiness(r *http.Request, sec *tcpguard.Context) {
+	sec.Request.Params = routeParams(r.Method, r.URL.Path)
 	sec.Business.Action = firstNonEmpty(r.Header.Get("X-Business-Action"), actionFromPath(r.Method, r.URL.Path))
 	sec.Business.Entity = r.Header.Get("X-Business-Entity")
 	sec.Business.Workflow = r.Header.Get("X-Workflow")
@@ -350,6 +397,20 @@ func extractBusiness(r *http.Request, sec *tcpguard.Context) {
 	if amount := r.Header.Get("X-Business-Amount"); amount != "" {
 		sec.Business.Amount, _ = strconv.ParseFloat(amount, 64)
 	}
+}
+
+func routeParams(method, path string) map[string]string {
+	if method != http.MethodPut && method != http.MethodPatch && method != http.MethodDelete {
+		return nil
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "users" && parts[3] == "order" {
+		return map[string]string{
+			"id":       parts[2],
+			"order_id": parts[4],
+		}
+	}
+	return nil
 }
 
 func actionFromPath(method, path string) string {

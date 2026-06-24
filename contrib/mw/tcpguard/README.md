@@ -54,6 +54,7 @@ app.Use(tcpguardmw.MiddlewareWithConfig(tcpguardmw.Config{
         return c.Path() == "/healthz"
     },
     HeaderPrefix: "X-TCPGuard",
+    HeaderMode: tcpguardmw.HeaderModeCompact, // minimal headers for normal APIs
     ResponsePolicy: tcpguard.DefaultResponseMessagePolicy(tcpguard.EnvironmentProduction),
     OnDecision: func(c *fh.Ctx, result tcpguard.HTTPRequestResult) {
         // write structured logs, metrics, traces, or SOC events
@@ -74,13 +75,15 @@ If TCPGuard enforces the decision, the middleware writes the upstream TCPGuard r
 
 ## Headers
 
-The adapter sets safe response metadata headers:
+`HeaderModeStandard` preserves the original adapter behavior and can set these safe metadata headers:
 
 - `X-TCPGuard-Decision`
 - `X-TCPGuard-Severity`
 - `X-TCPGuard-Trace`
 - `X-TCPGuard-Message`
 - `X-TCPGuard-Risk` when the response policy enables risk score exposure
+
+`HeaderModeCompact` keeps normal responses quiet: allowed requests only receive `X-TCPGuard-Decision`, while enforced decisions also receive severity, trace, and a safe public message. `HeaderModeNone` disables adapter metadata headers entirely.
 
 ## Complete example
 

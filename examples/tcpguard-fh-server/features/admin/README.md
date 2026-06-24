@@ -23,5 +23,5 @@ curl -i -X POST \
 Expected status is a challenge or forbidden response depending on rule effect. A clean allowed response is:
 
 ```json
-{"ok":true,"message":"admin change accepted","risk":""}
+{"ok":true,"message":"admin change accepted"}
 ```

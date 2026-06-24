@@ -23,8 +23,7 @@ curl -i http://127.0.0.1:18184/public
 ```json
 {
   "ok": true,
-  "message": "clean request allowed",
-  "risk": ""
+  "message": "clean request allowed"
 }
 ```
 

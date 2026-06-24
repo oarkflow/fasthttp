@@ -10,6 +10,8 @@ go mod tidy
 go run .
 ```
 
+The example defaults to a compact production-style response contract. Use `TCPGUARD_ENV=development go run .` only when you need full local diagnostics such as matched rule IDs, evidence, and field-level details.
+
 Application server: `http://127.0.0.1:18184`
 
 Management server: `http://127.0.0.1:18185`
@@ -28,13 +30,13 @@ The adapter calls `Guard.EvaluateHTTPRequest` for each FH request and uses TCPGu
 
 ## User-facing decision messages
 
-TCPGuard renders safe, readable decision responses through `ResponseMessagePolicy`. This example intentionally also uses `WithResponseRenderer` so production APIs keep a stable, professional response envelope while still using the environment-aware public response builder internally. The FH adapter uses the same policy for metadata headers and `OnDecision` emits structured decision logs for every allowed, monitored, challenged, throttled, blocked, or denied request.
+TCPGuard renders safe, readable decision responses through `ResponseMessagePolicy`. This example intentionally also uses `WithResponseRenderer` so production APIs keep a stable, professional response envelope while still using the environment-aware public response builder internally. The FH adapter uses the same policy for metadata headers and `OnDecision` emits structured logs for enforced or non-info decisions by default.
 
 Environment behavior:
 
-- `TCPGUARD_ENV=production` or unset: returns a compact user message with only `code`, `message`, `reason`, `status`, and `request_id`. It does **not** return duplicated outcome fields, risk scores, details arrays, action lists, rule internals, raw headers, tokens, signatures, nonces, body payloads, datasource values, or noisy debug metadata.
-- `TCPGUARD_ENV=staging`: keeps production-safe values and may include bounded diagnostic fields for validation.
-- `TCPGUARD_ENV=development` or `test`: returns full diagnostics for local debugging, including matched rule IDs and non-sensitive values. Sensitive fields such as authorization, cookie, token, secret, password, API key, signature, nonce, card, CVV, body, and payload are still redacted when detected.
+- Unset `TCPGUARD_ENV` or set `TCPGUARD_ENV=production`: compact response contract. The public body contains only the safe decision code/message, concise reason, status, and request ID. It does **not** return duplicated outcome fields, risk scores, details arrays, action lists, rule internals, raw headers, tokens, signatures, nonces, body payloads, datasource values, or noisy debug metadata.
+- `TCPGUARD_ENV=staging`: production-safe values with bounded diagnostics when TCPGuard policy allows them.
+- `TCPGUARD_ENV=development` or `TCPGUARD_ENV=test`: local diagnostics such as matched rule IDs, public evidence, and field-level details. Sensitive fields such as authorization, cookie, token, secret, password, API key, signature, nonce, card, CVV, body, and payload are still redacted when detected.
 
 Production denial body shape:
 
@@ -48,14 +50,14 @@ Production denial body shape:
 }
 ```
 
-Development denial body shape adds diagnostic fields such as `details[].message`, `details[].fields`, `matched_rules`, public evidence, and action errors where applicable.
+Development denial bodies add diagnostic fields such as `details[].message`, `details[].fields`, `matched_rules`, public evidence, and action errors where applicable. Keep development diagnostics off for normal demos and production.
 
 
 ## Response renderer and structured logs
 
 This example keeps `WithResponseRenderer` enabled. The renderer does **not** expose raw TCPGuard internals directly. Instead, it wraps `tcpguard.PublicDecisionResponseRenderer(exampleResponsePolicy())`. That gives applications full control over their public response contract without leaking sensitive evidence or adding noisy debug metadata.
 
-The FH middleware also configures `OnDecision: logHTTPDecision`. Every decision is written as a compact structured JSON log entry using `tcpguard.DecisionLogEntry(...)`. Production logs include the trigger/rule, concise reason, deduplicated finding summary, compact action summary, request ID, method/path, safe entity references, policy version, incident reference, and audit ID where available. They intentionally do **not** dump the full request object, business context, trace, audit envelope hashes, rate-counter evidence, or all raw decision internals into normal application logs. Set `TCPGUARD_ENV=development` or `policy.LogLevel = tcpguard.DecisionLogFull` when you need the full redacted diagnostic trace locally or in a trusted SIEM sink.
+The FH middleware configures `OnDecision: logHTTPDecision`. By default, only enforced or non-info decisions are written as compact structured JSON log entries using `tcpguard.DecisionLogEntry(...)`. Set `TCPGUARD_LOG_ALLOWED=true` when you also want allow-decision logs. Production logs include the trigger/rule, concise reason, deduplicated finding summary, compact action summary, request ID, method/path, safe entity references, policy version, incident reference, and audit ID where available. They intentionally do **not** dump the full request object, business context, trace, audit envelope hashes, rate-counter evidence, or all raw decision internals into normal application logs. Set `TCPGUARD_ENV=development` or `policy.LogLevel = tcpguard.DecisionLogFull` when you need the full redacted diagnostic trace locally or in a trusted SIEM sink.
 
 Production user response goal: minimal, understandable, supportable.
 
@@ -73,7 +75,7 @@ Example production response fields:
 }
 ```
 
-Example production log fields include:
+Example compact production log fields include:
 
 ```json
 {
@@ -82,22 +84,16 @@ Example production log fields include:
   "method": "POST",
   "path": "/api/v1/transfers",
   "effect": "block",
-  "allowed": false,
   "severity": "critical",
-  "risk_score": 90,
   "reason": "request timestamp is outside allowed clock skew",
   "triggered_rules": ["signed-transfer-replay-or-mitm"],
-  "findings": [{"id":"timestamp_skew","type":"timestamp_skew","severity":"medium","risk":65}],
-  "actions": ["block", "create_incident"],
-  "actions_skipped": 1,
   "incident_created": true,
-  "user_hash": "...",
-  "ip_hash": "...",
   "tenant": "demo-bank",
-  "policy_version": "2026.05.13",
   "audit_id": "audit_1"
 }
 ```
+
+Allowed `info` decisions are not logged unless `TCPGUARD_LOG_ALLOWED=true`, which keeps normal demo output readable while preserving full audit/metrics inside TCPGuard.
 
 ## What is included
 
@@ -132,11 +128,23 @@ app.Post("/api/v1/transfers", guardMiddleware, ok("signed transfer accepted"))
 
 This keeps each endpoint in control of its own middleware chain. Operational demo endpoints such as `/_demo/metrics`, `/_demo/audit`, and `/_demo/sign` stay outside the business guard chain, while every business endpoint explicitly opts into TCPGuard and can add more route-specific middleware beside it.
 
+
+## Verify the documented examples
+
+Start the server in one terminal, then run the smoke verifier in another terminal:
+
+```bash
+cd examples/tcpguard-fh-server
+./scripts/verify_examples.sh
+```
+
+The script validates the most important documented scenarios: clean allow, debug throttle, banned user, tenant lockdown, bad IP file intel, geo restriction, admin challenge, sensitive export, high-value payment block, dynamic route ownership, invalid transfer signature, and management health.
+
 ## Curl scenarios
 
 ### 1. Clean public request
 
-Purpose: proves the FH adapter lets low-risk traffic pass and still adds TCPGuard metadata headers.
+Purpose: proves the FH adapter lets low-risk traffic pass with a compact application response and minimal TCPGuard metadata headers.
 
 ```bash
 curl -i http://127.0.0.1:18184/public
@@ -149,7 +157,7 @@ Expected response:
 - Body shape:
 
 ```json
-{"ok":true,"message":"clean request allowed","risk":""}
+{"ok":true,"message":"clean request allowed"}
 ```
 
 Response description: TCPGuard evaluated the request, found no abuse/business/security signal, and FH continued to the route handler.
@@ -243,7 +251,7 @@ Expected response:
 
 - Status: challenge-style response, commonly `403` depending renderer/effect mapping
 - Production body contains a readable challenge/block message and request ID; development body includes `matched_rules` containing `account-takeover-correlation-chain` and trace contributors
-- Production application logs include the matched rule, trace contributors, findings, actions, and incident/approval references
+- Production application logs include a compact rule/finding/action summary and incident/approval references
 
 Response description: the rule sequence matches an ATO chain and escalates to MFA/SOC notification/incident action.
 
@@ -264,7 +272,7 @@ Expected response:
 
 - Status: challenge-style response
 - Headers: `X-TCPGuard-Decision: challenge`, `X-TCPGuard-Severity: high`
-- Body includes `account-takeover-abuse` and finding `account_takeover_risk`
+- Compact body includes a safe challenge reason and request ID. Development mode includes `account-takeover-abuse` and finding `account_takeover_risk`.
 
 Response description: TCPGuard combines new device, country change, session drift, and profile risk into an ATO score.
 
@@ -295,7 +303,7 @@ curl -i -H 'X-Tenant-ID: locked-tenant' http://127.0.0.1:18184/public
 Expected response:
 
 - Status: `403 Forbidden`
-- Body includes matched rule `tenant-lockdown`
+- Compact body includes a safe block reason and request ID. Development mode includes matched rule `tenant-lockdown`.
 - Headers include `X-TCPGuard-Decision: block`
 
 Response description: tenant config is loaded from `data/tenants.json`; the locked tenant is denied globally.
@@ -311,8 +319,8 @@ curl -i -H 'X-Forwarded-For: 203.0.113.10' http://127.0.0.1:18184/public
 Expected response:
 
 - Status: `403 Forbidden`
-- Body includes matched rule `block-bad-ip`
-- Findings/evidence indicate blacklisted IP/reputation data
+- Compact body includes a safe block reason and request ID. Development mode includes matched rule `block-bad-ip`.
+- Operator logs/audit provide the blacklisted IP/reputation evidence without exposing it in the public response.
 
 Response description: the IP is loaded from `data/bad_ips.txt` and enriched before rule evaluation.
 
@@ -333,7 +341,7 @@ Expected response:
 
 - Status: challenge-style response
 - Headers: `X-TCPGuard-Decision: challenge`, `X-TCPGuard-Severity: high`
-- Body includes matched rule `admin-after-hours-department-check`
+- Compact body includes a safe challenge reason and request ID. Development mode includes matched rule `admin-after-hours-department-check`.
 - Body may include approval records
 
 Response description: admin activity outside business hours from a risky context requires security review/MFA.
@@ -352,7 +360,7 @@ curl -i -X POST \
 Expected response:
 
 - Status: challenge-style response
-- Body includes rule `sensitive-export`
+- Compact body includes a safe challenge reason and request ID. Development mode includes rule `sensitive-export`.
 - Findings may include `sensitive_export` or export-related abuse signals
 
 Response description: high-sensitivity exports are challenged even if the HTTP request is otherwise valid.
@@ -385,7 +393,7 @@ curl -i 'http://127.0.0.1:18184/public?file=../../etc/passwd'
 Expected response:
 
 - Status: `403 Forbidden`
-- Body includes rule `application-attack-probe`
+- Compact body includes a safe throttle reason and request ID. Development mode includes rule `application-attack-probe`.
 - Findings include application abuse such as path traversal probe
 
 Response description: TCPGuard detects probe payloads before the route handler processes the request.
@@ -424,7 +432,7 @@ Expected response:
 
 - Status: `403 Forbidden`
 - Headers: `X-TCPGuard-Decision: block`, `X-TCPGuard-Severity: critical`
-- Body includes matched rule `high-value-payment-after-hours`
+- Compact body includes a safe block reason and request ID. Development mode includes matched rule `high-value-payment-after-hours`.
 
 Response description: the derived event `business.high_value_payment` fires and blocks high-value after-hours approval.
 
@@ -441,7 +449,7 @@ curl -i -X PUT \
 Expected response:
 
 - Status: challenge-style response
-- Body includes rule `dynamic-order-change`
+- Compact body includes a safe challenge reason and request ID. Development mode includes rule `dynamic-order-change`.
 - Evidence shows route params, especially `request.params.id = user-2`
 
 Response description: user `user-1` is trying to modify `user-2`'s order, so TCPGuard challenges the request.
@@ -463,7 +471,7 @@ Expected response:
 
 - Status: `403 Forbidden`
 - Headers: `X-TCPGuard-Decision: block`, `X-TCPGuard-Severity: critical`
-- Body includes rule `signed-transfer-replay-or-mitm`
+- Compact body includes a safe block reason and request ID. Development mode includes rule `signed-transfer-replay-or-mitm`.
 - Findings include `invalid_signature`
 
 Response description: signed endpoints cannot be called with forged signatures.
@@ -502,7 +510,7 @@ curl -i -X POST \
 Expected response:
 
 - First use: `200 OK`, body `{"ok":true,"message":"signed transfer accepted",...}`
-- Reusing the same nonce: `403 Forbidden` with finding `nonce_reused`
+- Reusing the same nonce: `403 Forbidden` with a compact replay/timestamp/signature reason. Development mode includes finding `nonce_reused` when emitted by TCPGuard.
 
 Response description: signature validation passes once; nonce reuse is blocked as replay.
 
@@ -555,7 +563,7 @@ curl -i -X POST \
 Expected response:
 
 - Status: `200 OK`
-- Body includes `effect`, `risk`, `matched`, `findings`, `evidence`, `audit_hash`, and `policy`
+- Body includes compact simulation/explain output. Use development mode or the management API for deeper diagnostic fields such as matched rules, findings, evidence, audit hash, and policy metadata.
 
 Response description: the management API explains why a synthetic request would be allowed, blocked, challenged, or throttled.
 

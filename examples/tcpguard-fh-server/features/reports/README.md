@@ -23,7 +23,7 @@ curl -i -X POST \
 Allowed exports return:
 
 ```json
-{"ok":true,"message":"export started","risk":""}
+{"ok":true,"message":"export started"}
 ```
 
 Sensitive or repeated exports can return a TCPGuard challenge or block response.

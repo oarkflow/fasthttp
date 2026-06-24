@@ -6,5 +6,9 @@
   "locked-bank": {
     "lockdown": true,
     "region": "emea"
+  },
+  "locked-tenant": {
+    "lockdown": true,
+    "region": "emea"
   }
 }

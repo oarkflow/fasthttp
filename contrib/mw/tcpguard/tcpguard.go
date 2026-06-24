@@ -13,7 +13,21 @@ import (
 	guard "github.com/oarkflow/tcpguard"
 )
 
-// Config controls the fh adapter behavior.
+// HeaderMode controls how much decision metadata the adapter writes to HTTP headers.
+type HeaderMode string
+
+const (
+	// HeaderModeStandard preserves the historical adapter behavior and writes
+	// decision, severity, trace, risk (when enabled), and public message headers.
+	HeaderModeStandard HeaderMode = "standard"
+	// HeaderModeCompact writes only the fields useful for support/debugging.
+	// Allowed requests get X-TCPGuard-Decision only; enforced decisions also get
+	// severity, trace, and a safe public message.
+	HeaderModeCompact HeaderMode = "compact"
+	// HeaderModeNone disables TCPGuard response metadata headers entirely.
+	HeaderModeNone HeaderMode = "none"
+)
+
 type Config struct {
 	// Guard is the TCPGuard instance used to evaluate requests. Required.
 	Guard *guard.Guard
@@ -37,6 +51,10 @@ type Config struct {
 	// ResponsePolicy controls the safe X-TCPGuard-Message header for allowed
 	// and denied decisions. Empty uses environment-detected safe defaults.
 	ResponsePolicy guard.ResponseMessagePolicy
+
+	// HeaderMode controls adapter-level response metadata. Empty uses
+	// HeaderModeStandard for backward compatibility.
+	HeaderMode HeaderMode
 }
 
 // Middleware adapts a TCPGuard Guard to fh middleware.
@@ -80,7 +98,7 @@ func MiddlewareWithConfig(cfg Config) fh.HandlerFunc {
 		if err != nil {
 			return handleError(cfg, c, err)
 		}
-		setDecisionHeaders(c, prefix, result, responsePolicy)
+		setDecisionHeaders(c, prefix, result, responsePolicy, cfg.HeaderMode)
 		if cfg.OnDecision != nil {
 			cfg.OnDecision(c, result)
 		}
@@ -105,11 +123,21 @@ func handleError(cfg Config, c *fh.Ctx, err error) error {
 	return err
 }
 
-func setDecisionHeaders(c *fh.Ctx, prefix string, result guard.HTTPRequestResult, policy guard.ResponseMessagePolicy) {
+func setDecisionHeaders(c *fh.Ctx, prefix string, result guard.HTTPRequestResult, policy guard.ResponseMessagePolicy, mode HeaderMode) {
+	if mode == "" {
+		mode = HeaderModeStandard
+	}
+	if mode == HeaderModeNone {
+		return
+	}
+	c.Set(prefix+"-Decision", string(result.Decision.Effect))
+
+	if mode == HeaderModeCompact && !result.Enforced {
+		return
+	}
 	if policy.IncludeRiskScore {
 		c.Set(prefix+"-Risk", fmt.Sprintf("%.0f", result.Decision.Risk.Score))
 	}
-	c.Set(prefix+"-Decision", string(result.Decision.Effect))
 	if result.Decision.Severity != "" {
 		c.Set(prefix+"-Severity", string(result.Decision.Severity))
 	}
