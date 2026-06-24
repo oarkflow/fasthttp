@@ -70,6 +70,11 @@ type Config struct {
 	// params valid for the handler lifetime, and no response-body capture unless
 	// middleware explicitly asks for it. It is enabled by default.
 	FastMode bool
+	// DisablePanicRecovery removes the application-level panic recovery defer from
+	// every request. It is useful for trusted benchmark/edge deployments that use
+	// process supervision or explicit recover middleware. Leave false for robust
+	// production defaults.
+	DisablePanicRecovery bool
 	// SafeParams forces route params to be copied into stable strings. Leave false
 	// for benchmark/server hot paths; turn on only when params are stored after the request.
 	SafeParams bool
@@ -172,6 +177,9 @@ func WithMaxConcurrentStreams(n uint32) Option {
 }
 func WithFastMode(enabled bool) Option {
 	return func(c *Config) { c.FastMode = enabled }
+}
+func WithDisablePanicRecovery(disabled bool) Option {
+	return func(c *Config) { c.DisablePanicRecovery = disabled }
 }
 func WithSafeParams(enabled bool) Option {
 	return func(c *Config) { c.SafeParams = enabled }
@@ -1126,6 +1134,10 @@ func (a *App) serveConn(conn net.Conn) {
 }
 
 func (a *App) dispatch(ctx *DefaultCtx) {
+	if a.cfg.DisablePanicRecovery {
+		a.dispatchCore(ctx)
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			if a.cfg.Debug {
@@ -1138,7 +1150,10 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 			}
 		}
 	}()
+	a.dispatchCore(ctx)
+}
 
+func (a *App) dispatchCore(ctx *DefaultCtx) {
 	for rewrites := 0; ; rewrites++ {
 		if rewrites > 8 {
 			a.cfg.ErrorHandler(ctx, NewHTTPError(StatusLoopDetected, "REWRITE_LOOP", "Too many internal rewrites"))

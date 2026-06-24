@@ -66,10 +66,8 @@ func (s Server) String() string {
 
 var servers = []Server{
 	{Name: "fh", Lang: "Go", Port: 3001, RunDir: "servers/go/fh"},
-	{Name: "gin", Lang: "Go", Port: 3002, RunDir: "servers/go/gin"},
 	{Name: "fiber", Lang: "Go", Port: 3003, RunDir: "servers/go/fiber"},
 	{Name: "fasthttp", Lang: "Go", Port: 3004, RunDir: "servers/go/fasthttp"},
-	{Name: "net/http", Lang: "Go", Port: 3005, RunDir: "servers/go/nethttp"},
 }
 
 type Scenario struct {

@@ -1242,6 +1242,41 @@ func appendJSONValue(dst []byte, v any) ([]byte, error) {
 	}
 }
 
+// AppendJSONString appends s as a complete quoted JSON string.
+func AppendJSONString(dst []byte, s string) []byte { return appendJSONString(dst, s) }
+
+// AppendJSONStringContent appends s escaped for JSON string content without surrounding quotes.
+// It is useful with JSONAppend when callers already wrote the opening/closing quote.
+func AppendJSONStringContent(dst []byte, s string) []byte { return appendJSONStringContent(dst, s) }
+
+func appendJSONStringContent(dst []byte, s string) []byte {
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == '\\' || c == '"' {
+			dst = append(dst, s[start:i]...)
+			switch c {
+			case '\\', '"':
+				dst = append(dst, '\\', c)
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexLower[c>>4], hexLower[c&0x0f])
+			}
+			start = i + 1
+		}
+	}
+	return append(dst, s[start:]...)
+}
+
 func appendJSONString(dst []byte, s string) []byte {
 	dst = append(dst, '"')
 	start := 0

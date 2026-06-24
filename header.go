@@ -493,11 +493,7 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			}
 			h.ContentLength, h.HasContentLength = n, true
 		case knownConnection:
-			if hasHeaderToken(val, "close") {
-				h.KeepAlive = false
-			} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
-				h.KeepAlive = true
-			}
+			applyConnectionHeader(h, val)
 		case knownTransferEncoding:
 			if seenTransferEncoding {
 				return 0, ErrMalformedRequest
@@ -584,6 +580,34 @@ func knownHeader(k []byte) knownHeaderKind {
 		}
 	}
 	return knownNone
+}
+
+func applyConnectionHeader(h *RequestHeader, val []byte) {
+	// The benchmark and the common browser/client hot path are exact
+	// "keep-alive" or "close". Avoid comma-token parsing unless needed.
+	switch len(val) {
+	case 5:
+		if lower5(val, 'c', 'l', 'o', 's', 'e') {
+			h.KeepAlive = false
+		}
+		return
+	case 10:
+		if lowerN(val, "keep-alive") {
+			if bytes.Equal(h.Proto, strHTTP10) {
+				h.KeepAlive = true
+			}
+			return
+		}
+	}
+	if hasHeaderToken(val, "close") {
+		h.KeepAlive = false
+	} else if bytes.Equal(h.Proto, strHTTP10) && hasHeaderToken(val, "keep-alive") {
+		h.KeepAlive = true
+	}
+}
+
+func lower5(b []byte, a, c, d, e, f byte) bool {
+	return (b[0]|0x20) == a && (b[1]|0x20) == c && (b[2]|0x20) == d && (b[3]|0x20) == e && (b[4]|0x20) == f
 }
 
 func lower4(b []byte, a, c, d, e byte) bool {
