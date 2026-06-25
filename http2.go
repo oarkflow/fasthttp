@@ -103,12 +103,21 @@ type h2Conn struct {
 	flowCond          *sync.Cond
 	connSendWindow    int64
 	peerInitialWindow int64
-	peerMaxFrame      atomic.Uint32
-	peerMaxHeaderList atomic.Uint32
-	upgradeStream     *h2Stream
+	// peer* settings control what this server may send. local* settings control
+	// what this server is willing to receive. Never let a client SETTINGS frame
+	// mutate App-wide config or local receive limits.
+	peerMaxFrame              atomic.Uint32
+	localMaxFrame             atomic.Uint32
+	peerMaxHeaderList         atomic.Uint32
+	peerMaxConcurrentStreams  atomic.Uint32
+	localMaxConcurrentStreams uint32
+	upgradeStream             *h2Stream
 
-	// Per-connection buffered flow control window counters for batching
-	connRecvWindow int64
+	// Per-connection receive flow control. connRecvWindowAccum batches consumed
+	// bytes for WINDOW_UPDATE; connRecvWindowRemaining enforces the advertised
+	// connection-level receive window.
+	connRecvWindowAccum     int64
+	connRecvWindowRemaining int64
 
 	// Rapid reset protection
 	resetCount       int
@@ -150,15 +159,19 @@ type h2Response struct {
 func newH2Conn(app *App, conn net.Conn) *h2Conn {
 	h := &h2Conn{
 		app: app, conn: conn, r: conn,
-		streams:           make(map[uint32]*h2Stream),
-		streamSem:         make(chan struct{}, maxH2ConcurrentStreams(app)),
-		connSendWindow:    h2InitialWindow,
-		peerInitialWindow: h2InitialWindow,
-		resetWindowStart:  time.Now(),
+		streams:                   make(map[uint32]*h2Stream),
+		streamSem:                 make(chan struct{}, maxH2ConcurrentStreams(app)),
+		connSendWindow:            h2InitialWindow,
+		connRecvWindowRemaining:   h2InitialWindow,
+		peerInitialWindow:         h2InitialWindow,
+		localMaxConcurrentStreams: maxH2ConcurrentStreams(app),
+		resetWindowStart:          time.Now(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 	h.peerMaxFrame.Store(h2DefaultFrame)
+	h.localMaxFrame.Store(h2DefaultFrame)
 	h.peerMaxHeaderList.Store(^uint32(0))
+	h.peerMaxConcurrentStreams.Store(^uint32(0))
 	h.flowCond = sync.NewCond(&h.flowMu)
 	h.enc = hpack.NewEncoder(&h.encBuf)
 	h.dec = hpack.NewDecoder(4096, func(hpack.HeaderField) {})
@@ -339,7 +352,7 @@ func (h *h2Conn) readFrame() (h2Frame, error) {
 	}
 
 	length := int(head[0])<<16 | int(head[1])<<8 | int(head[2])
-	maxFrame := int(h.peerMaxFrame.Load())
+	maxFrame := int(h.localMaxFrame.Load())
 	if length > maxFrame {
 		return h2Frame{}, h2ConnError{h2FrameSizeError}
 	}
@@ -466,7 +479,10 @@ func (h *h2Conn) applySettings(payload []byte) error {
 				return h2ConnError{h2ProtocolError}
 			}
 		case 3:
-			h.app.cfg.MaxConcurrentStreams = uint32(value)
+			// Client's SETTINGS_MAX_CONCURRENT_STREAMS limits streams that we
+			// initiate toward that peer; it must not change server inbound limits
+			// and must never mutate App-wide config shared by other connections.
+			h.peerMaxConcurrentStreams.Store(value)
 		case 4:
 			if value > uint32(h2MaxWindow) {
 				return h2ConnError{h2FlowControlError}
@@ -490,6 +506,7 @@ func (h *h2Conn) applySettings(payload []byte) error {
 			if value < h2DefaultFrame || value > 1<<24-1 {
 				return h2ConnError{h2ProtocolError}
 			}
+			// Peer receive frame size: use only when sending to the peer.
 			h.peerMaxFrame.Store(value)
 		case 6:
 			h.peerMaxHeaderList.Store(value)
@@ -546,7 +563,7 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			return h2ConnError{h2ProtocolError}
 		}
 		h.lastStream = f.streamID
-		if h.draining.Load() || uint32(len(h.streams)) >= maxH2ConcurrentStreams(h.app) {
+		if h.draining.Load() || uint32(len(h.streams)) >= h.localMaxConcurrentStreams {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2RefusedStream)
 			return nil
@@ -564,7 +581,12 @@ func (h *h2Conn) handleHeaders(f h2Frame) error {
 			cancel:     cancel,
 		}
 		s.state.Store(int32(initialState))
-		if err := validateRequestFields(s, fields); err != nil {
+		if len(fields) > h.app.cfg.MaxHeaderCount && h.app.cfg.MaxHeaderCount > 0 {
+			h.mu.Unlock()
+			h.sendRST(f.streamID, h2EnhanceYourCalm)
+			return nil
+		}
+		if err := validateRequestFields(s, fields, h.app.cfg.MaxHeaderCount); err != nil {
 			h.mu.Unlock()
 			h.sendRST(f.streamID, h2ProtocolError)
 			return nil
@@ -690,8 +712,16 @@ func (h *h2Conn) handleData(f h2Frame) error {
 		h.sendRST(f.streamID, h2Cancel)
 		return nil
 	}
+	flowControlled := len(f.payload)
+	if flowControlled > 0 {
+		h.connRecvWindowRemaining -= int64(flowControlled)
+		if h.connRecvWindowRemaining < 0 {
+			h.mu.Unlock()
+			return h2ConnError{h2FlowControlError}
+		}
+	}
 	s.body = append(s.body, p...)
-	s.recvWindow -= int64(len(f.payload))
+	s.recvWindow -= int64(flowControlled)
 	if s.recvWindow < 0 {
 		h.mu.Unlock()
 		return h2ConnError{h2FlowControlError}
@@ -699,12 +729,13 @@ func (h *h2Conn) handleData(f h2Frame) error {
 	// Batched flow control: accumulate consumed bytes and send WINDOW_UPDATE
 	// at threshold to avoid per-frame updates (RFC 9113 §6.9.1).
 	var connWU, streamWU uint32
-	if len(f.payload) > 0 {
-		h.connRecvWindow += int64(len(f.payload))
-		s.recvWindowAccum += int64(len(f.payload))
-		if h.connRecvWindow >= windowsUpdateThreshold {
-			connWU = uint32(h.connRecvWindow)
-			h.connRecvWindow = 0
+	if flowControlled > 0 {
+		h.connRecvWindowAccum += int64(flowControlled)
+		s.recvWindowAccum += int64(flowControlled)
+		if h.connRecvWindowAccum >= windowsUpdateThreshold {
+			connWU = uint32(h.connRecvWindowAccum)
+			h.connRecvWindowRemaining += h.connRecvWindowAccum
+			h.connRecvWindowAccum = 0
 		}
 		if s.recvWindowAccum >= windowsUpdateThreshold {
 			streamWU = uint32(s.recvWindowAccum)
@@ -811,25 +842,33 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 		defer func() { <-h.streamSem }()
 		ctx := acquireCtx(h.conn, h.app)
 		ctx.h2 = &h2Response{conn: h, stream: s}
-		ctx.Header.Method = []byte(s.method)
-		ctx.Header.URI = []byte(s.path)
+		ctx.Header.Method = s2b(s.method)
+		ctx.Header.URI = s2b(s.path)
+		ctx.Header.RequestTarget = ctx.Header.URI
+		ctx.Header.Path = ctx.Header.URI
 		ctx.Header.Proto = []byte("HTTP/2.0")
-		ctx.Header.Host = []byte(s.authority)
+		ctx.Header.Host = s2b(s.authority)
 		ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
 		ctx.Header.KeepAlive = true
-		if cap(ctx.Header.headers) < maxHeaders {
-			ctx.Header.headers = make([]Header, maxHeaders)
+		maxHdrs := h.app.cfg.MaxHeaderCount
+		if maxHdrs <= 0 {
+			maxHdrs = maxHeaders
+		}
+		if cap(ctx.Header.headers) < maxHdrs {
+			ctx.Header.headers = make([]Header, maxHdrs)
 		} else {
-			ctx.Header.headers = ctx.Header.headers[:maxHeaders]
+			ctx.Header.headers = ctx.Header.headers[:maxHdrs]
 		}
 		for _, field := range s.headers {
-			if ctx.Header.hcount >= maxHeaders {
-				break
+			if ctx.Header.hcount >= maxHdrs {
+				h.sendRST(s.id, h2EnhanceYourCalm)
+				releaseCtx(ctx)
+				return
 			}
-			ctx.Header.headers[ctx.Header.hcount] = Header{Key: []byte(field.Name), Value: []byte(field.Value)}
+			ctx.Header.headers[ctx.Header.hcount] = Header{Key: s2b(field.Name), Value: s2b(field.Value)}
 			ctx.Header.hcount++
 			if field.Name == "content-type" {
-				ctx.Header.ContentType = []byte(field.Value)
+				ctx.Header.ContentType = s2b(field.Value)
 			}
 		}
 		ctx.Header.HasContentLength, ctx.Header.ContentLength = s.hasContentLength, s.contentLength
@@ -844,7 +883,12 @@ func (h *h2Conn) dispatch(s *h2Stream) {
 	}()
 }
 
-func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
+func validateRequestFields(s *h2Stream, fields []hpack.HeaderField, maxHeaderCountOpt ...int) error {
+	maxHeaderCount := maxHeaders
+	if len(maxHeaderCountOpt) > 0 && maxHeaderCountOpt[0] > 0 {
+		maxHeaderCount = maxHeaderCountOpt[0]
+	}
+	regularCount := 0
 	pseudoDone := false
 	var seenPseudo uint8
 	seenHost := false
@@ -917,9 +961,17 @@ func validateRequestFields(s *h2Stream, fields []hpack.HeaderField) error {
 			cookies += f.Value
 			continue
 		}
+		regularCount++
+		if regularCount > maxHeaderCount {
+			return errors.New("too many headers")
+		}
 		s.headers = append(s.headers, f)
 	}
 	if cookies != "" {
+		regularCount++
+		if regularCount > maxHeaderCount {
+			return errors.New("too many headers")
+		}
 		s.headers = append(s.headers, hpack.HeaderField{Name: "cookie", Value: cookies})
 	}
 	if s.method == "" || !validToken([]byte(s.method)) || s.authority == "" {

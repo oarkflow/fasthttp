@@ -12,9 +12,13 @@ import (
 type Mode string
 
 const (
+	// ModeFast keeps raw throughput defaults for trusted benchmark/edge use.
+	ModeFast        Mode = "fast"
 	ModeDevelopment Mode = "development"
 	ModeProduction  Mode = "production"
-	ModeStrict      Mode = "strict"
+	// ModeEnterprise enables strict protocol, audit/reliability and compliance evidence defaults.
+	ModeEnterprise Mode = "enterprise"
+	ModeStrict     Mode = "strict"
 )
 
 // ComplianceProfile selects a built-in security/compliance baseline. fh does
@@ -104,11 +108,7 @@ func applyComplianceDefaults(cfg *Config) {
 		return
 	}
 	if cfg.Mode == "" {
-		if cfg.Compliance.Enabled || cfg.Compliance.Profile != "" {
-			cfg.Mode = ModeProduction
-		} else {
-			cfg.Mode = ModeProduction
-		}
+		cfg.Mode = ModeProduction
 	}
 	if cfg.Compliance.EndpointPrefix == "" {
 		cfg.Compliance.EndpointPrefix = "/_fh"
@@ -116,8 +116,31 @@ func applyComplianceDefaults(cfg *Config) {
 	if cfg.Compliance.Enabled && cfg.Compliance.Profile == "" {
 		cfg.Compliance.Profile = ComplianceProfessional
 	}
-	if !cfg.Redaction.Enabled && (cfg.Compliance.Enabled || cfg.Mode == ModeProduction || cfg.Mode == ModeStrict) {
+	if !cfg.Redaction.Enabled && (cfg.Compliance.Enabled || cfg.Mode == ModeProduction || cfg.Mode == ModeStrict || cfg.Mode == ModeEnterprise) {
 		cfg.Redaction = DefaultRedactionConfig()
+	}
+	if cfg.Mode == ModeProduction || cfg.Mode == ModeEnterprise || cfg.Mode == ModeStrict {
+		if cfg.ReadTimeout == 0 {
+			cfg.ReadTimeout = 10 * time.Second
+		}
+		if cfg.WriteTimeout == 0 {
+			cfg.WriteTimeout = 30 * time.Second
+		}
+		if cfg.IdleTimeout == 0 {
+			cfg.IdleTimeout = 60 * time.Second
+		}
+		cfg.SendDateHeader = true
+	}
+	if cfg.Mode == ModeFast {
+		cfg.SendDateHeader = false
+	}
+	if cfg.Mode == ModeEnterprise {
+		cfg.Compliance.Enabled = true
+		if cfg.Compliance.Profile == "" {
+			cfg.Compliance.Profile = ComplianceEnterprise
+		}
+		cfg.Compliance.Strict = true
+		cfg.Compliance.ExposeEndpoints = true
 	}
 	if cfg.Compliance.Enabled {
 		if cfg.ReadTimeout == 0 {
@@ -153,7 +176,7 @@ func applyComplianceDefaults(cfg *Config) {
 			cfg.Audit.Enabled = true
 		}
 	}
-	if cfg.Mode == ModeStrict || cfg.Compliance.Strict || cfg.Compliance.Profile == ComplianceSecurityStrict || cfg.Compliance.Profile == ComplianceFinancial || cfg.Compliance.Profile == ComplianceHealthcare || cfg.Compliance.Profile == ComplianceGovernment {
+	if cfg.Mode == ModeStrict || cfg.Mode == ModeEnterprise || cfg.Compliance.Strict || cfg.Compliance.Profile == ComplianceSecurityStrict || cfg.Compliance.Profile == ComplianceFinancial || cfg.Compliance.Profile == ComplianceHealthcare || cfg.Compliance.Profile == ComplianceGovernment {
 		cfg.Compliance.Strict = true
 		cfg.StrictHeaderValueValidation = true
 		cfg.SendDateHeader = true
@@ -213,7 +236,7 @@ func (a *App) ValidateSecurity() []SecurityFinding {
 		return nil
 	}
 	var f []SecurityFinding
-	prod := a.cfg.Mode == ModeProduction || a.cfg.Mode == ModeStrict || a.cfg.Compliance.Enabled
+	prod := a.cfg.Mode == ModeProduction || a.cfg.Mode == ModeStrict || a.cfg.Mode == ModeEnterprise || a.cfg.Compliance.Enabled
 	if prod && a.cfg.Debug {
 		f = append(f, SecurityFinding{"critical", "DEBUG_ENABLED", "debug error exposure is enabled in production/compliance mode", "disable Config.Debug", ""})
 	}

@@ -227,6 +227,33 @@ func WithCompliance(cc ComplianceConfig) Option {
 	return func(c *Config) { c.Compliance = cc }
 }
 
+// WithMode selects the runtime profile. ModeFast keeps benchmark-oriented
+// defaults; ModeProduction and ModeStrict enable safer network defaults.
+func WithMode(mode Mode) Option {
+	return func(c *Config) { c.Mode = mode }
+}
+
+// NewFast creates an app with benchmark-oriented defaults. Use this only behind
+// a trusted edge or for controlled latency/RPS benchmarks.
+func NewFast(opts ...Option) *App {
+	all := append([]Option{WithMode(ModeFast)}, opts...)
+	return New(all...)
+}
+
+// NewProduction creates an app with production-safe protocol defaults while
+// keeping the request hot path allocation-sensitive.
+func NewProduction(opts ...Option) *App {
+	all := append([]Option{WithMode(ModeProduction)}, opts...)
+	return New(all...)
+}
+
+// NewEnterprise creates an app with strict protocol validation, audit,
+// reliability, redaction and compliance evidence endpoints enabled.
+func NewEnterprise(opts ...Option) *App {
+	all := append([]Option{WithMode(ModeEnterprise), WithCompliance(ComplianceConfig{Enabled: true, Profile: ComplianceEnterprise, Strict: true, ExposeEndpoints: true})}, opts...)
+	return New(all...)
+}
+
 var ErrAppAlreadyStarted = errors.New("fh: app has already been started")
 var ErrRewrite = errors.New("fh: reroute rewritten request")
 
@@ -945,16 +972,20 @@ func (a *App) serveConn(conn net.Conn) {
 		}
 		if ctx.Header.UnsupportedTransferEncoding {
 			releaseCtx(ctx)
-			_ = writeAll(conn, serverError501)
+			_ = writeAll(conn, serverError400)
 			return
 		}
 		// The request buffer stays alive until the handler completes, so zero-copy request state can
 		// preserve OriginalURL without copying bytes on every request. Rewrite assigns
 		// Header.URI to a separate target slice, leaving originalURI intact.
+		origTarget := ctx.Header.RequestTarget
+		if len(origTarget) == 0 {
+			origTarget = ctx.Header.URI
+		}
 		if a.cfg.SafeParams {
-			ctx.originalURI = append(ctx.originalURI[:0], ctx.Header.URI...)
+			ctx.originalURI = append(ctx.originalURI[:0], origTarget...)
 		} else {
-			ctx.originalURI = ctx.Header.URI
+			ctx.originalURI = origTarget
 		}
 
 		// h2c upgrade: HTTP/1.1 Upgrade: h2c, Connection: Upgrade, HTTP2-Settings

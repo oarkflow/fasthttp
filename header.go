@@ -12,6 +12,7 @@ import (
 // Used internally for zero-allocation comparisons. String variants (Str suffix)
 // are available for user-facing APIs like ctx.Set().
 var (
+	slashBytes    = []byte("/")
 	strHTTP11     = []byte("HTTP/1.1")
 	strHTTP10     = []byte("HTTP/1.0")
 	strCRLF       = []byte("\r\n")
@@ -92,8 +93,11 @@ type Header struct {
 // RequestHeader holds parsed request metadata. All fields are slices
 // into the underlying read buffer — no allocations during parse.
 type RequestHeader struct {
-	Method                      []byte
-	URI                         []byte
+	Method []byte
+	URI    []byte
+	// RequestTarget is the exact target from the request line. URI is kept as
+	// the compatibility alias used by older handlers.
+	RequestTarget               []byte
 	Path                        []byte
 	QueryString                 []byte
 	Proto                       []byte
@@ -120,6 +124,7 @@ func (h *RequestHeader) reset() {
 	}
 	h.Method = nil
 	h.URI = nil
+	h.RequestTarget = nil
 	h.Path = nil
 	h.QueryString = nil
 	h.Proto = nil
@@ -359,11 +364,14 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 	if !bytes.Equal(proto, strHTTP11) && !bytes.Equal(proto, strHTTP10) {
 		return 0, NewHTTPError(505, "HTTP_VERSION_NOT_SUPPORTED", "HTTP version not supported")
 	}
+	routeTarget := target
 	validTarget := target[0] == '/'
 	if !validTarget {
 		if methodIs(method, 'O', 'P', 'T', 'I', 'O', 'N', 'S') && len(target) == 1 && target[0] == '*' {
 			validTarget = true
 		} else if methodIs(method, 'C', 'O', 'N', 'N', 'E', 'C', 'T') && bytes.IndexByte(target, '/') < 0 {
+			// CONNECT uses authority-form. Keep it as the request target; routing to
+			// CONNECT handlers remains explicit instead of silently tunnelling.
 			validTarget = true
 		} else if absIdx := bytes.Index(target, []byte("://")); absIdx > 0 && absIdx+3 < len(target) {
 			validTarget = true
@@ -371,6 +379,23 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
 					validTarget = false
 					break
+				}
+			}
+			if validTarget {
+				authStart := absIdx + 3
+				pathStart := authStart
+				for pathStart < len(target) && target[pathStart] != '/' && target[pathStart] != '?' {
+					pathStart++
+				}
+				if pathStart < len(target) && target[pathStart] == '/' {
+					routeTarget = target[pathStart:]
+				} else if pathStart < len(target) && target[pathStart] == '?' {
+					routeTarget = target[pathStart:pathStart]
+				} else {
+					routeTarget = target[len(target):]
+				}
+				if len(h.Host) == 0 && pathStart > authStart {
+					h.Host = target[authStart:pathStart]
 				}
 			}
 		}
@@ -387,16 +412,29 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 			queryAt = i
 		}
 	}
-	h.Method, h.URI, h.Proto = method, target, proto
-	if queryAt >= 0 {
-		h.Path = target[:queryAt]
-		if queryAt+1 < len(target) {
+	routeQueryAt := -1
+	for i, c := range routeTarget {
+		if c == '?' && routeQueryAt < 0 {
+			routeQueryAt = i
+		}
+	}
+	h.Method, h.URI, h.RequestTarget, h.Proto = method, routeTarget, target, proto
+	if len(routeTarget) == 0 {
+		h.Path = slashBytes
+		if queryAt >= 0 && queryAt+1 < len(target) {
 			h.QueryString = target[queryAt+1:]
 		} else {
-			h.QueryString = target[:0]
+			h.QueryString = nil
+		}
+	} else if routeQueryAt >= 0 {
+		h.Path = routeTarget[:routeQueryAt]
+		if routeQueryAt+1 < len(routeTarget) {
+			h.QueryString = routeTarget[routeQueryAt+1:]
+		} else {
+			h.QueryString = routeTarget[:0]
 		}
 	} else {
-		h.Path = target
+		h.Path = routeTarget
 		h.QueryString = nil
 	}
 	h.KeepAlive = len(proto) == len(strHTTP11) && bytes.Equal(proto, strHTTP11)
@@ -429,8 +467,11 @@ func parseHeadersWithLimit(src []byte, h *RequestHeader, maxCount int) (int, err
 }
 
 func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, strictValueValidation bool) (int, error) {
-	if cap(h.headers) < maxHeaders {
-		h.headers = make([]Header, maxHeaders)
+	if maxCount <= 0 {
+		maxCount = maxHeaders
+	}
+	if cap(h.headers) < maxCount {
+		h.headers = make([]Header, maxCount)
 	}
 	h.hcount = 0
 	seenHost, seenTransferEncoding := false, false
@@ -532,7 +573,7 @@ func parseHeadersWithLimitStrict(src []byte, h *RequestHeader, maxCount int, str
 			h.HTTP2Settings = val
 		}
 
-		if h.hcount >= maxCount || h.hcount >= maxHeaders {
+		if h.hcount >= maxCount {
 			return 0, ErrMalformedRequest
 		}
 		h.headers[h.hcount] = Header{Key: key, Value: val}

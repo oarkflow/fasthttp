@@ -328,11 +328,67 @@ func (c *DefaultCtx) RequestHeader() *RequestHeader { return &c.Header }
 
 func (c *DefaultCtx) Method() string { return string(c.Header.Method) }
 
+// MethodBytes returns the request method without allocation. The slice is valid
+// only during the handler lifetime.
+func (c *DefaultCtx) MethodBytes() []byte { return c.Header.Method }
+
+// PathBytes returns the route path without allocation. The slice is valid only
+// during the handler lifetime.
+func (c *DefaultCtx) PathBytes() []byte { return c.path() }
+
+// OriginalURLBytes returns the exact request target from the request line when
+// available, without allocation. It is valid only during the handler lifetime.
+func (c *DefaultCtx) OriginalURLBytes() []byte {
+	if len(c.originalURI) != 0 {
+		return c.originalURI
+	}
+	if len(c.Header.RequestTarget) != 0 {
+		return c.Header.RequestTarget
+	}
+	return c.Header.URI
+}
+
+// QueryBytes returns a raw query parameter value without decoding or allocation.
+// Use Query when percent-decoding/string ownership is required.
+func (c *DefaultCtx) QueryBytes(name []byte) []byte {
+	qs := c.Header.QueryString
+	for len(qs) > 0 {
+		if qs[0] == '&' {
+			qs = qs[1:]
+			continue
+		}
+		end := indexByte(qs, '&')
+		pair := qs
+		if end >= 0 {
+			pair = qs[:end]
+		}
+		eq := indexByte(pair, '=')
+		key, val := pair, []byte(nil)
+		if eq >= 0 {
+			key, val = pair[:eq], pair[eq+1:]
+		}
+		if bytes.Equal(key, name) {
+			return val
+		}
+		if end < 0 {
+			break
+		}
+		qs = qs[end+1:]
+	}
+	return nil
+}
+
+// HeaderBytes returns a request header value without allocation.
+func (c *DefaultCtx) HeaderBytes(name []byte) []byte { return c.Header.Peek(name) }
+
 // OriginalURL returns the request target as it arrived, before any Rewrite.
 // The name mirrors Fiber's Ctx API.
 func (c *DefaultCtx) OriginalURL() string {
 	if len(c.originalURI) != 0 {
 		return string(c.originalURI)
+	}
+	if len(c.Header.RequestTarget) != 0 {
+		return string(c.Header.RequestTarget)
 	}
 	return string(c.Header.URI)
 }
