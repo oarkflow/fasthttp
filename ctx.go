@@ -338,6 +338,9 @@ func (c *DefaultCtx) OriginalURL() string {
 }
 
 func (c *DefaultCtx) path() []byte {
+	if c.Header.Path != nil {
+		return c.Header.Path
+	}
 	uri := c.Header.URI
 	for i, v := range uri {
 		if v == '?' {
@@ -357,6 +360,17 @@ func (c *DefaultCtx) Rewrite(target string) error {
 		return BadRequest("Invalid rewrite target")
 	}
 	c.Header.URI = []byte(target)
+	if qi := strings.IndexByte(target, '?'); qi >= 0 {
+		c.Header.Path = c.Header.URI[:qi]
+		if qi+1 < len(c.Header.URI) {
+			c.Header.QueryString = c.Header.URI[qi+1:]
+		} else {
+			c.Header.QueryString = c.Header.URI[:0]
+		}
+	} else {
+		c.Header.Path = c.Header.URI
+		c.Header.QueryString = nil
+	}
 	c.queryParsed = false
 	c.qcount = 0
 	clear(c.queryParams)
@@ -405,12 +419,10 @@ func (c *DefaultCtx) Query(name string, def ...string) string {
 }
 
 func (c *DefaultCtx) peekQuery(name string) (string, bool) {
-	uri := c.Header.URI
-	qi := indexByte(uri, '?')
-	if qi < 0 || qi+1 >= len(uri) {
+	qs := c.Header.QueryString
+	if len(qs) == 0 {
 		return "", false
 	}
-	qs := uri[qi+1:]
 	for len(qs) > 0 {
 		if qs[0] == '&' {
 			qs = qs[1:]
@@ -451,23 +463,7 @@ func rawQueryKeyEqual(key []byte, name string) bool {
 
 func (c *DefaultCtx) parseQuery() {
 	c.queryParsed = true
-	uri := c.Header.URI
-	n := len(uri)
-	if n == 0 {
-		return
-	}
-	// Find '?' in a single pass along with parsing
-	qi := -1
-	for i := 0; i < n; i++ {
-		if uri[i] == '?' {
-			qi = i
-			break
-		}
-	}
-	if qi < 0 {
-		return
-	}
-	qs := uri[qi+1:]
+	qs := c.Header.QueryString
 	nq := len(qs)
 	if nq == 0 {
 		return
@@ -1095,9 +1091,7 @@ func (c *DefaultCtx) writeResponseString(s string) error {
 		}
 		buf = append(buf, '\r', '\n')
 	} else if bodyAllowed {
-		buf = append(buf, "Content-Length: "...)
-		buf = appendInt(buf, len(s))
-		buf = append(buf, '\r', '\n')
+		buf = appendContentLengthLine(buf, len(s))
 	}
 
 	if c.Header.KeepAlive && !c.forceClose {
@@ -1402,9 +1396,7 @@ func (c *DefaultCtx) writeResponse(body []byte) error {
 		}
 		buf = append(buf, '\r', '\n')
 	} else if bodyAllowed {
-		buf = append(buf, "Content-Length: "...)
-		buf = appendInt(buf, len(body))
-		buf = append(buf, '\r', '\n')
+		buf = appendContentLengthLine(buf, len(body))
 	}
 
 	if c.Header.KeepAlive && !c.forceClose {
@@ -1464,16 +1456,15 @@ func (c *DefaultCtx) writeFast200String(s string) error {
 		buf = append(buf, c.contentType...)
 		buf = append(buf, '\r', '\n')
 	}
-	buf = append(buf, "Content-Length: "...)
-	buf = appendInt(buf, len(s))
+	buf = appendContentLengthLine(buf, len(s))
 	if c.Header.KeepAlive && !c.forceClose {
 		if c.server.cfg.SendKeepAliveHeader {
-			buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+			buf = append(buf, "Connection: keep-alive\r\n\r\n"...)
 		} else {
-			buf = append(buf, "\r\n\r\n"...)
+			buf = append(buf, "\r\n"...)
 		}
 	} else {
-		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+		buf = append(buf, "Connection: close\r\n\r\n"...)
 	}
 	buf = append(buf, s...)
 	*c.writeBuf = buf
@@ -1495,16 +1486,15 @@ func (c *DefaultCtx) writeFast200Bytes(body []byte) error {
 		buf = append(buf, c.contentType...)
 		buf = append(buf, '\r', '\n')
 	}
-	buf = append(buf, "Content-Length: "...)
-	buf = appendInt(buf, len(body))
+	buf = appendContentLengthLine(buf, len(body))
 	if c.Header.KeepAlive && !c.forceClose {
 		if c.server.cfg.SendKeepAliveHeader {
-			buf = append(buf, "\r\nConnection: keep-alive\r\n\r\n"...)
+			buf = append(buf, "Connection: keep-alive\r\n\r\n"...)
 		} else {
-			buf = append(buf, "\r\n\r\n"...)
+			buf = append(buf, "\r\n"...)
 		}
 	} else {
-		buf = append(buf, "\r\nConnection: close\r\n\r\n"...)
+		buf = append(buf, "Connection: close\r\n\r\n"...)
 	}
 	if len(body) >= writevBodyThreshold {
 		*c.writeBuf = buf

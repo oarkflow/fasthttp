@@ -1,8 +1,17 @@
 package fh
 
 import (
+	"strconv"
 	"sync"
 )
+
+var contentLengthSmall [1024]string
+
+func init() {
+	for i := range contentLengthSmall {
+		contentLengthSmall[i] = "Content-Length: " + strconv.Itoa(i) + "\r\n"
+	}
+}
 
 var (
 	bufPool512 = sync.Pool{New: func() any { b := make([]byte, 512); return &b }}
@@ -77,4 +86,13 @@ func appendInt(dst []byte, n int) []byte {
 		n /= 10
 	}
 	return append(dst, buf[pos:]...)
+}
+
+func appendContentLengthLine(dst []byte, n int) []byte {
+	if n >= 0 && n < len(contentLengthSmall) {
+		return append(dst, contentLengthSmall[n]...)
+	}
+	dst = append(dst, "Content-Length: "...)
+	dst = appendInt(dst, n)
+	return append(dst, '\r', '\n')
 }

@@ -22,7 +22,10 @@ func init() {
 }
 
 func main() {
-	app := fh.New()
+	app := fh.New(
+		fh.WithDisableHTTP2(true),
+		fh.WithDisablePanicRecovery(true),
+	)
 
 	app.Get("/plaintext", func(c fh.Ctx) error {
 		return c.SendString("Hello, World!")

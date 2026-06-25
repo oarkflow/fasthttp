@@ -94,6 +94,8 @@ type Header struct {
 type RequestHeader struct {
 	Method                      []byte
 	URI                         []byte
+	Path                        []byte
+	QueryString                 []byte
 	Proto                       []byte
 	Host                        []byte
 	ContentType                 []byte
@@ -118,6 +120,8 @@ func (h *RequestHeader) reset() {
 	}
 	h.Method = nil
 	h.URI = nil
+	h.Path = nil
+	h.QueryString = nil
 	h.Proto = nil
 	h.Host = nil
 	h.ContentType = nil
@@ -374,12 +378,27 @@ func parseRequestLine(buf []byte, h *RequestHeader, maxLineSize int) (int, error
 	if !validTarget {
 		return 0, ErrMalformedRequest
 	}
-	for _, c := range target {
+	queryAt := -1
+	for i, c := range target {
 		if c <= 0x20 || c == 0x7f || c == '#' {
 			return 0, ErrMalformedRequest
 		}
+		if c == '?' && queryAt < 0 {
+			queryAt = i
+		}
 	}
 	h.Method, h.URI, h.Proto = method, target, proto
+	if queryAt >= 0 {
+		h.Path = target[:queryAt]
+		if queryAt+1 < len(target) {
+			h.QueryString = target[queryAt+1:]
+		} else {
+			h.QueryString = target[:0]
+		}
+	} else {
+		h.Path = target
+		h.QueryString = nil
+	}
 	h.KeepAlive = len(proto) == len(strHTTP11) && bytes.Equal(proto, strHTTP11)
 	return lineEnd + 2, nil
 }
@@ -758,18 +777,6 @@ func parseTransferCoding(val []byte) (chunked bool, ok bool) {
 		return true, true
 	}
 	return false, true
-}
-
-// parseIntFast parses a decimal integer from bytes without allocation.
-func parseIntFast(b []byte) int {
-	n := 0
-	for _, c := range b {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n
 }
 
 func BytesEqualFold(a, b []byte) bool {

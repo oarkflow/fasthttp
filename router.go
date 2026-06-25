@@ -366,6 +366,9 @@ func (r *Router) findNoLockBytesFast(fastStatic []fastStaticRoute, static map[st
 	if h := matchFastStaticRoutes(fastStatic, path, params); h != nil {
 		return h
 	}
+	if h := matchFastParamRoutes(fast, path, params, r.UnsafeParams); h != nil {
+		return h
+	}
 	if static != nil {
 		if h := static[b2s(path)]; h != nil {
 			if params != nil {
@@ -373,9 +376,6 @@ func (r *Router) findNoLockBytesFast(fastStatic []fastStaticRoute, static map[st
 			}
 			return h
 		}
-	}
-	if h := matchFastParamRoutes(fast, path, params, r.UnsafeParams); h != nil {
-		return h
 	}
 
 	var local []Param
