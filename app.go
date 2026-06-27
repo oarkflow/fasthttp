@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"os/signal"
 	"runtime/debug"
@@ -102,7 +101,7 @@ type Config struct {
 	NotFoundHandler             NotFoundHandler
 	MethodNotAllowed            MethodNotAllowedHandler
 	OptionsHandler              OptionsHandler
-	Logger                      *log.Logger
+	Logger                      Logger
 	TemplateEngine              TemplateEngine
 	// Reliability enables request journal, idempotency, and durable async queue.
 	Reliability ReliabilityConfig
@@ -208,7 +207,7 @@ func WithMethodNotAllowedHandler(h MethodNotAllowedHandler) Option {
 func WithOptionsHandler(h OptionsHandler) Option {
 	return func(c *Config) { c.OptionsHandler = h }
 }
-func WithLogger(l *log.Logger) Option {
+func WithLogger(l Logger) Option {
 	return func(c *Config) { c.Logger = l }
 }
 func WithTemplateEngine(te TemplateEngine) Option {
@@ -264,7 +263,7 @@ type App struct {
 	cfg          Config
 	router       *Router
 	hooks        Hooks
-	logger       *log.Logger
+	logger       Logger
 	middleware   []HandlerFunc
 	sem          chan struct{}
 	listener     net.Listener
@@ -343,7 +342,7 @@ func buildApp(cfg Config) *App {
 
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.Default()
+		logger = newSlogLogger()
 	}
 
 	app := &App{
@@ -597,11 +596,11 @@ func (a *App) ListenWithGracefulShutdown(addr string) error {
 
 	go func() {
 		<-ctx.Done()
-		a.logger.Printf("[fh] signal received, starting graceful shutdown...")
+		a.logger.Info("signal received, starting graceful shutdown")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.effectiveShutdownTimeout())
 		defer cancel()
 		if err := a.ShutdownWithContext(shutdownCtx); err != nil {
-			a.logger.Printf("[fh] graceful shutdown: %v", err)
+			a.logger.Error("graceful shutdown error", "error", err)
 		}
 	}()
 
@@ -647,7 +646,7 @@ func (a *App) Serve(ln net.Listener) error {
 		}
 	}
 
-	a.logger.Printf("[fh] Listening on %s", ln.Addr())
+	a.logger.Info("listening", "addr", ln.Addr())
 
 	var acceptErr error
 	for {
@@ -658,7 +657,7 @@ func (a *App) Serve(ln net.Listener) error {
 			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				a.logger.Printf("[fh] accept timeout: %v", err)
+				a.logger.Warn("accept timeout", "error", err)
 				continue
 			}
 			acceptErr = err
@@ -785,18 +784,18 @@ func (a *App) runShutdownHooks() {
 		if a.audit != nil {
 			if closer, ok := a.audit.(AuditSinkCloser); ok {
 				if err := closer.Close(); err != nil {
-					a.logger.Printf("[fh] audit shutdown error: %v", err)
+					a.logger.Error("audit shutdown error", "error", err)
 				}
 			}
 		}
 		if a.reliability != nil {
 			if err := a.reliability.Close(); err != nil {
-				a.logger.Printf("[fh] reliability shutdown error: %v", err)
+				a.logger.Error("reliability shutdown error", "error", err)
 			}
 		}
 		for _, fn := range a.hooks.onShutdown {
 			if err := fn(); err != nil {
-				a.logger.Printf("[fh] shutdown hook error: %v", err)
+				a.logger.Error("shutdown hook error", "error", err)
 			}
 		}
 	})
@@ -825,7 +824,7 @@ func (a *App) setH2Conn(conn net.Conn, h2c *h2Conn) {
 func (a *App) serveConn(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			a.logger.Printf("[fh] connection hook panic: %v\n%s", r, debug.Stack())
+			a.logger.Error("connection hook panic", "panic", r, "stack", string(debug.Stack()))
 		}
 		conn.Close()
 		a.connMu.Lock()
@@ -835,7 +834,7 @@ func (a *App) serveConn(conn net.Conn) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						a.logger.Printf("[fh] close hook panic: %v", r)
+						a.logger.Error("close hook panic", "panic", r)
 					}
 				}()
 				fn(conn)
@@ -1168,10 +1167,18 @@ func (a *App) dispatch(ctx *DefaultCtx) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			a.logger.Error("panic recovered",
+				"method", ctx.Method(),
+				"path", ctx.Path(),
+				"ip", ctx.IP(),
+				"panic", r,
+			)
 			if a.cfg.Debug {
-				a.logger.Printf("[fh] panic: %v\n%s", r, debug.Stack())
-			} else {
-				a.logger.Printf("[fh] panic: %v", r)
+				a.logger.Error("panic stack trace",
+					"method", ctx.Method(),
+					"path", ctx.Path(),
+					"stack", string(debug.Stack()),
+				)
 			}
 			if !ctx.responded {
 				a.cfg.ErrorHandler(ctx, NewPanicError(r))
@@ -1336,7 +1343,12 @@ func isTimeoutErr(err error) bool {
 
 func defaultErrorHandler(ctx Ctx, err error) {
 	if dc, ok := ctx.(*DefaultCtx); ok && dc.server != nil && dc.server.logger != nil {
-		dc.server.logger.Printf("[fh] request error: %v", err)
+		dc.server.logger.Error("request error",
+			"method", ctx.Method(),
+			"path", ctx.Path(),
+			"ip", ctx.IP(),
+			"error", err,
+		)
 	}
 	_ = ctx.SafeErrorResponse(err)
 }

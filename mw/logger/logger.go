@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,9 +27,9 @@ type Config struct {
 	// TimeFormat defaults to time.RFC3339.
 	TimeFormat string
 
-	// Logger enables standard library log.Logger output.
-	// If nil and Slog is nil and Writers is empty, log.Default() is used.
-	Logger *log.Logger
+	// Logger enables fh.Logger output (defaults to log/slog).
+	// If nil and Slog is nil and Writers is empty, fh.NewDefaultLogger() is used.
+	Logger fh.Logger
 
 	// Slog enables structured slog output.
 	Slog *slog.Logger
@@ -212,15 +210,11 @@ func NewMiddleware(config ...Config) *Middleware {
 		cfg.MaxLineBytes = 4096
 	}
 
-	textOn := len(cfg.Writers) > 0 || cfg.Logger != nil || cfg.Slog == nil
+	textOn := len(cfg.Writers) > 0 || cfg.Logger != nil
 	slogOn := cfg.Slog != nil
 
 	if cfg.Logger == nil && cfg.Slog == nil && len(cfg.Writers) == 0 {
-		cfg.Logger = log.Default()
-	}
-
-	if len(cfg.Writers) == 0 && cfg.Logger == nil && cfg.Slog == nil {
-		cfg.Writers = []io.Writer{os.Stderr}
+		cfg.Logger = fh.NewDefaultLogger()
 	}
 
 	m := &Middleware{
@@ -574,7 +568,7 @@ func (o *asyncOutput) writeEntry(e *logEntry) {
 				}
 			}
 			if o.cfg.Logger != nil {
-				_ = o.cfg.Logger.Output(3, string(bytes.TrimRight(e.line, "\n")))
+				o.cfg.Logger.Printf("%s", bytes.TrimRight(e.line, "\n"))
 			}
 		}
 
