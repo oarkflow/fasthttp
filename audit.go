@@ -2,6 +2,8 @@ package fh
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -207,4 +209,51 @@ func safeCtxIP(c *DefaultCtx) (ip string) {
 		return ""
 	}
 	return c.IP()
+}
+
+// HashChainAuditSink wraps an AuditSink and adds tamper-evident hash-chain
+// metadata to every event. The previous event hash and current event hash are
+// stored in Metadata as audit_prev_hash and audit_hash before forwarding.
+type HashChainAuditSink struct {
+	mu   sync.Mutex
+	next AuditSink
+	prev string
+}
+
+func NewHashChainAuditSink(next AuditSink) *HashChainAuditSink {
+	return &HashChainAuditSink{next: next}
+}
+func (s *HashChainAuditSink) WriteAudit(ctx context.Context, e AuditEvent) error {
+	if s == nil || s.next == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.Metadata == nil {
+		e.Metadata = map[string]any{}
+	}
+	e.Metadata["audit_prev_hash"] = s.prev
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(b)
+	cur := hex.EncodeToString(sum[:])
+	e.Metadata["audit_hash"] = cur
+	s.prev = cur
+	return s.next.WriteAudit(ctx, e)
+}
+func (s *HashChainAuditSink) PreviousHash() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prev
+}
+func (s *HashChainAuditSink) Close() error {
+	if c, ok := s.next.(AuditSinkCloser); ok {
+		return c.Close()
+	}
+	return nil
 }

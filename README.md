@@ -928,3 +928,17 @@ go run ./cmd/fh apikey:generate --prefix fh_live
 ```
 
 Admin endpoints are now deny-by-default unless `Auth` is configured or `AllowInsecure` is explicitly set for local development.
+
+## Production gaps continued
+
+The latest production batch adds asymmetric JWT verification/signing helpers, JWKS parsing, `jti` revocation hooks, required-claim validation, a stored outbox/inbox implementation, tamper-evident audit hash chaining, and baseline smoke tests across all middleware packages. See `docs/PRODUCTION_GAPS_CONTINUED_REST.md`.
+
+
+### Continued production implementation
+
+This package includes additional production support added after the security/core batch:
+
+- `mw/jwt.JWKSCache` for JWKS-backed JWT verification through the existing authentication middleware.
+- `cluster` package for node heartbeat and lease-based leader election.
+- `config` package for JSON/env driven `fh.Config` loading.
+- `docs/REMAINING_GAPS_AND_CONTINUED_IMPLEMENTATION.md` with the current gap list and next implementation priorities.

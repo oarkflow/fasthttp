@@ -31,6 +31,8 @@ func main() {
 func jwtSign(args []string) {
 	fs := flag.NewFlagSet("jwt:sign", flag.ExitOnError)
 	secret := fs.String("secret", "", "HMAC secret")
+	privateKey := fs.String("private-key", "", "RSA private key PEM path for RS256/PS256")
+	kid := fs.String("kid", "", "JWT key id")
 	alg := fs.String("alg", "HS256", "algorithm")
 	sub := fs.String("sub", "", "subject")
 	tenant := fs.String("tenant", "", "tenant id")
@@ -40,8 +42,8 @@ func jwtSign(args []string) {
 	ttl := fs.Duration("ttl", time.Hour, "token lifetime")
 	claimsJSON := fs.String("claims", "", "JSON claims")
 	_ = fs.Parse(args)
-	if *secret == "" {
-		fmt.Fprintln(os.Stderr, "--secret is required")
+	if *secret == "" && *privateKey == "" {
+		fmt.Fprintln(os.Stderr, "--secret or --private-key is required")
 		os.Exit(2)
 	}
 	now := time.Now()
@@ -71,7 +73,26 @@ func jwtSign(args []string) {
 			claims[k] = v
 		}
 	}
-	tok, err := jwt.Sign(claims, []byte(*secret), *alg)
+	var tok string
+	var err error
+	switch strings.ToUpper(*alg) {
+	case "RS256":
+		b, rerr := os.ReadFile(*privateKey)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, rerr)
+			os.Exit(2)
+		}
+		tok, err = jwt.SignRS256(claims, b, *kid)
+	case "PS256":
+		b, rerr := os.ReadFile(*privateKey)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, rerr)
+			os.Exit(2)
+		}
+		tok, err = jwt.SignPS256(claims, b, *kid)
+	default:
+		tok, err = jwt.Sign(claims, []byte(*secret), *alg)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -37,6 +37,16 @@ type Config struct {
 	Error       ErrorHandler
 	Validate    ValidateFunc
 	Next        func(fh.Ctx) bool
+	// Clock allows deterministic validation in tests. Defaults to time.Now.
+	Clock func() time.Time
+	// RequiredClaims must be present in the JWT claims set.
+	RequiredClaims []string
+	// Revoked returns true when a jti should be rejected.
+	Revoked func(jti string) bool
+	// PublicKeyPEM/PublicKeys enable RS*/ES* verification without a custom KeyFunc.
+	// PublicKeys are selected by JWT header kid.
+	PublicKeyPEM []byte
+	PublicKeys   map[string][]byte
 
 	// Principal integration. JWT is authentication only; authorization remains in
 	// fh.RequireRole/RequirePermission/RequireScope or contrib/mw/authz.
@@ -128,25 +138,27 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 		if err != nil {
 			return nil, nil, err
 		}
+	} else if len(cfg.PublicKeys) > 0 {
+		if kid, _ := header["kid"].(string); kid != "" {
+			key = cfg.PublicKeys[kid]
+		}
+	} else if len(cfg.PublicKeyPEM) > 0 {
+		key = cfg.PublicKeyPEM
 	}
 	if len(key) == 0 {
 		return nil, nil, errors.New("missing verification key")
 	}
-	h, ok := jwtHash(alg)
-	if !ok {
-		return nil, nil, fmt.Errorf("algorithm %s is not supported", alg)
-	}
-	mac := hmac.New(h, key)
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	want := mac.Sum(nil)
 	got, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		return nil, nil, errors.New("bad signature encoding")
 	}
-	if !hmac.Equal(got, want) {
-		return nil, nil, errors.New("signature mismatch")
+	if err := verifySignature(alg, key, []byte(parts[0]+"."+parts[1]), got); err != nil {
+		return nil, nil, err
 	}
 	now := time.Now()
+	if cfg.Clock != nil {
+		now = cfg.Clock()
+	}
 	leeway := cfg.Leeway
 	if exp, ok := numberTime(claims["exp"]); ok && now.After(exp.Add(leeway)) {
 		return nil, nil, errors.New("token expired")
@@ -159,6 +171,19 @@ func Verify(c fh.Ctx, token string, cfg Config, allowed map[string]bool) (map[st
 	}
 	if cfg.Audience != "" && !hasAudience(claims["aud"], cfg.Audience) {
 		return nil, nil, errors.New("audience mismatch")
+	}
+	for _, claim := range cfg.RequiredClaims {
+		if strings.TrimSpace(claim) != "" {
+			if _, ok := claims[claim]; !ok {
+				return nil, nil, fmt.Errorf("missing required claim %s", claim)
+			}
+		}
+	}
+	if cfg.Revoked != nil {
+		jti, _ := claims["jti"].(string)
+		if jti != "" && cfg.Revoked(jti) {
+			return nil, nil, errors.New("token revoked")
+		}
 	}
 	if cfg.Validate != nil {
 		if err := cfg.Validate(c, header, claims); err != nil {
