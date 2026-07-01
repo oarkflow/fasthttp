@@ -334,6 +334,28 @@ app := fh.New(fh.Config{
 })
 ```
 
+
+## Pretty startup banner
+
+`fh` now prints a Fiber-style ASCII startup banner when the server starts. It is configurable, custom-renderable and can be disabled for strict JSON logging environments.
+
+```go
+app := fh.New(fh.WithStartupBanner(fh.StartupBannerConfig{
+    Name:     "billing-api",
+    Version:  "v2.4.1",
+    Subtitle: "Orgware billing service",
+    Color:    true,
+}))
+```
+
+Disable it:
+
+```go
+app := fh.New(fh.WithStartupBannerDisabled(true))
+```
+
+See [`docs/STARTUP_BANNER.md`](docs/STARTUP_BANNER.md) and [`examples/startup_banner`](examples/startup_banner).
+
 ## Configuration
 
 ```go

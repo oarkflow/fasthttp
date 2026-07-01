@@ -114,6 +114,10 @@ type Config struct {
 	// ShutdownTimeout is the maximum duration to wait for active connections to
 	// complete during graceful shutdown. Zero means wait indefinitely.
 	ShutdownTimeout time.Duration
+	// StartupBanner controls the optional pretty ASCII startup message printed
+	// when Serve starts. It is enabled by default and can be disabled for tests,
+	// embedded deployments, JSON-only logs, or process supervisors.
+	StartupBanner StartupBannerConfig
 }
 
 var defaultConfig = Config{
@@ -648,6 +652,7 @@ func (a *App) Serve(ln net.Listener) error {
 		}
 	}
 
+	a.printStartupBanner(ln)
 	a.logger.Info("listening", "addr", ln.Addr())
 
 	var acceptErr error

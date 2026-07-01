@@ -31,6 +31,17 @@ type Server struct {
 	Environment        string `json:"environment"`
 }
 
+type StartupBanner struct {
+	Disabled bool   `json:"disabled"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Subtitle string `json:"subtitle"`
+	Scheme   string `json:"scheme"`
+	Address  string `json:"address"`
+	ASCIIArt string `json:"ascii_art"`
+	Color    bool   `json:"color"`
+}
+
 type Reliability struct {
 	Enabled     bool   `json:"enabled"`
 	DataDir     string `json:"data_dir"`
@@ -40,8 +51,9 @@ type Reliability struct {
 }
 
 type Config struct {
-	Server      Server      `json:"server"`
-	Reliability Reliability `json:"reliability"`
+	Server        Server        `json:"server"`
+	StartupBanner StartupBanner `json:"startup_banner"`
+	Reliability   Reliability   `json:"reliability"`
 }
 
 func LoadJSON(r io.Reader) (Config, error) {
@@ -92,6 +104,21 @@ func ApplyEnv(c Config, prefix string) Config {
 	if v := os.Getenv(key("MAX_REQUEST_BODY_SIZE")); v != "" {
 		c.Server.MaxRequestBodySize = parseInt(v)
 	}
+	if v := os.Getenv(key("STARTUP_BANNER_DISABLED")); v != "" {
+		c.StartupBanner.Disabled = parseBool(v)
+	}
+	if v := os.Getenv(key("STARTUP_BANNER_NAME")); v != "" {
+		c.StartupBanner.Name = v
+	}
+	if v := os.Getenv(key("STARTUP_BANNER_VERSION")); v != "" {
+		c.StartupBanner.Version = v
+	}
+	if v := os.Getenv(key("STARTUP_BANNER_SUBTITLE")); v != "" {
+		c.StartupBanner.Subtitle = v
+	}
+	if v := os.Getenv(key("STARTUP_BANNER_COLOR")); v != "" {
+		c.StartupBanner.Color = parseBool(v)
+	}
 	if v := os.Getenv(key("RELIABILITY_ENABLED")); v != "" {
 		c.Reliability.Enabled = parseBool(v)
 	}
@@ -136,6 +163,16 @@ func (c Config) AppConfig() (fh.Config, error) {
 	out.MaxRequestLineSize = c.Server.MaxRequestLineSize
 	out.DisableHTTP2 = c.Server.DisableHTTP2
 	out.Debug = c.Server.Debug
+	out.StartupBanner = fh.StartupBannerConfig{
+		Disabled: c.StartupBanner.Disabled,
+		Name:     c.StartupBanner.Name,
+		Version:  c.StartupBanner.Version,
+		Subtitle: c.StartupBanner.Subtitle,
+		Scheme:   c.StartupBanner.Scheme,
+		Address:  c.StartupBanner.Address,
+		ASCIIArt: c.StartupBanner.ASCIIArt,
+		Color:    c.StartupBanner.Color,
+	}
 	switch strings.ToLower(c.Server.Environment) {
 	case "prod", "production":
 		out.Environment = fh.EnvProduction
